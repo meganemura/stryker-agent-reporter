@@ -1,0 +1,55 @@
+{
+  "name": "stryker-agent-reporter",
+  "version": "0.1.0",
+  "description": "A Stryker reporter that writes JSON Lines a coding agent can act on directly",
+  "license": "Apache-2.0",
+  "author": "meganemura",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/meganemura/stryker-agent-reporter.git"
+  },
+  "keywords": [
+    "stryker",
+    "stryker-plugin",
+    "mutation-testing",
+    "reporter",
+    "ai-agent"
+  ],
+  "type": "module",
+  "bin": {
+    "stryker-agent-reporter": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "schema",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "peerDependencies": {
+    "@stryker-mutator/api": "^10.0.0",
+    "@stryker-mutator/core": "^10.0.0"
+  },
+  "devDependencies": {
+    "@stryker-mutator/api": "10.0.0",
+    "@stryker-mutator/core": "10.0.0",
+    "mutation-testing-metrics": "3.8.4",
+    "typescript": "7.0.2",
+    "@types/node": "26.4.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\"",
+    "test:e2e": "node --test \"test/e2e/*.test.ts\"",
+    "prepack": "npm run build"
+  }
+}

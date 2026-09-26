@@ -1,0 +1,5 @@
+{
+  "name": "stryker-agent-reporter-e2e-fixture",
+  "private": true,
+  "type": "module"
+}

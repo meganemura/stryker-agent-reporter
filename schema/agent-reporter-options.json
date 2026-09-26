@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema",
+  "type": "object",
+  "title": "StrykerAgentReporterOptions",
+  "additionalProperties": false,
+  "properties": {
+    "agentReporter": {
+      "description": "The options for the agent reporter",
+      "title": "AgentReporterOptions",
+      "additionalProperties": false,
+      "type": "object",
+      "default": {},
+      "properties": {
+        "fileName": {
+          "description": "The relative filename for the agent report.",
+          "type": "string",
+          "default": "reports/mutation/agent.jsonl"
+        },
+        "partial": {
+          "description": "Write survivors, timeouts and other actionable mutant results to a partial report (named after `fileName`, with `.partial.jsonl` before its extension) as soon as each one is known, so a coding agent can act on them before the run finishes. Set to `false` to disable.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    }
+  }
+}
