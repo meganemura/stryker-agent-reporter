@@ -324,6 +324,14 @@ describe('AgentReporter', () => {
   }
 
   describe('onMutationTestReportReady', () => {
+    it('writes each location with start before end, as the partial file does', async () => {
+      const fileName = fileNameIn('agent.jsonl');
+      await actAndWrite(buildReport(), fileName);
+      const text = readFileSync(fileName, 'utf-8');
+      assert.match(text, /"location":\{"start":/);
+      assert.doesNotMatch(text, /"location":\{"end":/);
+    });
+
     it('writes to the configured file path', async () => {
       const fileName = fileNameIn('out', 'agent.jsonl');
       await actAndWrite(buildReport(), fileName);
