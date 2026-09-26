@@ -561,7 +561,13 @@ export function buildAgentReportLines(
       const keyedLocation: KeyedLocation = {
         key,
         file,
-        location: mutant.location,
+        // Rebuilt, not copied: the report lists `end` before `start`, and
+        // the partial file writes `start` first. One key order lets a
+        // reader compare lines from both files as text.
+        location: {
+          start: { line: mutant.location.start.line, column: mutant.location.start.column },
+          end: { line: mutant.location.end.line, column: mutant.location.end.column },
+        },
         mutatorName: mutant.mutatorName,
         replacement: mutant.replacement,
         original: record.original,
