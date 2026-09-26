@@ -14,7 +14,7 @@ npm lets a trusted publisher be added only to a package that already exists. The
 
 1. On 2026-09-26, the owner published `0.0.1` from a local `npm login` session. `0.0.1` is a placeholder that holds the package name. It contains `package.json`, `README.md`, and `LICENSE`, and no code. No access token was created for it.
 2. The GitHub Actions trusted publisher was then added on npmjs.com, with the values under "Trusted publisher" below.
-3. `0.1.0`, the first usable version, is the first publish through OIDC. After it succeeds, set the package to disallow token publishing, and deprecate the placeholder: `npm deprecate stryker-agent-reporter@0.0.1 "placeholder"`.
+3. `0.1.0`, the first usable version, was the first publish through OIDC, on 2026-09-26, with provenance. The package settings then disallow token publishing. The placeholder `0.0.1` stays as it is; its own README says it holds no code.
 4. Every `v*` tag publishes through OIDC alone; see "Each version" below.
 
 Do not repeat the bootstrap. A manual publish is needed again only if the package is deleted from npm.
