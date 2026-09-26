@@ -8,14 +8,16 @@ Pushing a `v*` tag runs [`.github/workflows/publish.yml`](../.github/workflows/p
 
 An environment and a trusted publisher create no state in this repository; they exist only in GitHub's and npm's own settings. Create them once, using the values below, before the first release.
 
-## Bootstrap: the first release
+## Bootstrap: done with a placeholder
 
-npm's trusted publisher for a package can only be set on a package that already exists, so the very first version needs one manual token-based publish:
+npm lets a trusted publisher be added only to a package that already exists. The bootstrap for this package is done:
 
-1. Create a short-lived, granular npm access token, scoped to publish this one package. Run `npm publish` with it once, locally, for `0.1.0`. Revoke the token immediately after.
-2. On npmjs.com, add a GitHub Actions trusted publisher to the now-existing package, with the values under "Trusted publisher" below.
-3. Confirm no token-based publish path remains: the bootstrap token is already revoked; npm's package settings can also disallow future token publishing.
-4. Every `v*` tag from here on publishes through OIDC alone; see "Each version" below.
+1. On 2026-09-26, a short-lived, granular npm access token published `0.0.1`, a placeholder that holds the package name. It contains `package.json`, `README.md`, and `LICENSE`, and no code. The token was deleted after that one publish.
+2. The GitHub Actions trusted publisher was then added on npmjs.com, with the values under "Trusted publisher" below.
+3. `0.1.0`, the first usable version, is the first publish through OIDC. After it succeeds, set the package to disallow token publishing, and deprecate the placeholder: `npm deprecate stryker-agent-reporter@0.0.1 "placeholder"`.
+4. Every `v*` tag publishes through OIDC alone; see "Each version" below.
+
+Do not repeat the bootstrap. A token publish is needed again only if the package is deleted from npm.
 
 ## Trusted publisher
 
