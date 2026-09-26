@@ -4,7 +4,7 @@ Before 1.0, a minor version may change the API.
 
 ## Unreleased
 
-## 0.1.0
+## 0.1.0 (2026-09-26)
 
 - The `agent` Stryker reporter: a JSON-Lines final file, and a partial file an agent can read before the run finishes. See `docs/output.md`.
 - `stryker-agent-reporter convert`: turns a saved `mutation.json` into the same JSON-Lines file the reporter would have written for that run.
