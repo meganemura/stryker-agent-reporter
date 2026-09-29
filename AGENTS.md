@@ -25,6 +25,7 @@ stryker-agent-reporter is a [Stryker](https://stryker-mutator.io/) reporter plug
 
 - `npm run typecheck` runs `tsc --noEmit` over `src` and `test`.
 - `npm test` runs the unit tests.
+- `npm run archstrict` checks the module boundaries in `archstrict.config.ts`.
 - `npm run build` emits `dist/` from `src/`.
 - `npm run test:e2e` runs the end-to-end test; it needs `npm run build` first.
 - `node dist/cli.js convert [mutation.json] [--output <file>]` and `node dist/cli.js gate [agent.jsonl] [--since <ref>] [--baseline <file>] [--format jsonl|github|text]` run the built commands directly; see `docs/output.md`.

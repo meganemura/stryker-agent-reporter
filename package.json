@@ -41,15 +41,17 @@
   "devDependencies": {
     "@stryker-mutator/api": "10.0.0",
     "@stryker-mutator/core": "10.0.0",
+    "@types/node": "26.4.0",
+    "archstrict": "0.1.0",
     "mutation-testing-metrics": "3.8.4",
-    "typescript": "7.0.2",
-    "@types/node": "26.4.0"
+    "typescript": "7.0.2"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/*.test.ts\"",
     "test:e2e": "node --test \"test/e2e/*.test.ts\"",
+    "archstrict": "archstrict check",
     "prepack": "npm run build"
   }
 }

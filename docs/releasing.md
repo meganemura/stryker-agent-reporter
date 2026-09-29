@@ -54,7 +54,7 @@ Set the repository's `sha_pinning_required` setting once the repository exists o
 
 1. Choose the version by SemVer (before 1.0, a minor version may change the API; `CHANGELOG.md`'s own opening line says so). Set it in `package.json`, then turn `CHANGELOG.md`'s `## Unreleased` heading into `## <version> (<date>)`. Keep one space after the version. The release job matches the heading `## <version> `. Add a `## Unreleased` heading first if none exists.
 2. `npm install --package-lock-only` so the lock file carries the version.
-3. `npm test` and `npm run typecheck`.
+3. `npm test`, `npm run typecheck`, and `npm run archstrict`.
 4. `npm pack --dry-run` and read the file list: `dist/`, `schema/`, `README.md`, `LICENSE`, `package.json`, and nothing else.
 5. Commit as `release: <version>`, tag `v<version>`, push the commit and the tag. The tag without the leading `v` is the `package.json` version; the workflow stops when they differ. The tag push starts the workflow.
 6. Approve the `publish` environment on that Actions run. The approval is requested when the job waits on that environment, which happens only after the tag starts `publish.yml`. The workflow uses Node 24 on `ubuntu-latest` with the npm registry URL set. It requires Node 24.20 or later on that line and npm 11.5.1 or later. It runs `npm ci`, `npm run build`, a check that the build did not modify tracked files, `npm run typecheck`, `npm test`, and `npm run test:e2e`, then `npm publish`. `dist/` is gitignored, so the new build output is expected and is what gets packed.
