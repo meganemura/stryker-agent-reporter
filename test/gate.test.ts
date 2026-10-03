@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -22,7 +23,16 @@ function writeAgentJsonl(dir: string, lines: unknown[]): string {
   return file;
 }
 
-const runLine = { kind: 'run', schemaVersion: '2', tool: 'stryker', strykerVersion: '10.0.0', disableBail: false, concurrency: undefined };
+const runLine = { kind: 'run', schemaVersion: '3', tool: 'stryker', strykerVersion: '10.0.0', disableBail: false, concurrency: undefined };
+
+function scopeLine(
+  file: string,
+  keys: string[],
+  pending: string[] = [],
+  sourceHash = 'abc123abc123abcd',
+) {
+  return { kind: 'scope', file, sourceHash, keys, pending };
+}
 
 function survivor(overrides: Record<string, unknown> = {}) {
   return {
@@ -116,6 +126,15 @@ describe('gate: exit codes', () => {
     assert.equal(result.exitCode, 3);
     assert.match(result.stderr, /did not finish/);
   });
+
+  it('exits 3, not 2, when the input is empty (an unfinished run)', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gate-empty-'));
+    const file = path.join(dir, 'agent.jsonl');
+    writeFileSync(file, '');
+    const result = runGate(baseArgs(file), dir);
+    assert.equal(result.exitCode, 3);
+    assert.match(result.stderr, /did not finish/);
+  });
 });
 
 describe('gate: --format github', () => {
@@ -159,6 +178,10 @@ describe('gate: --baseline', () => {
     const currentDir = mkdtempSync(path.join(tmpdir(), 'gate-baseline-current-'));
     const currentFile = writeAgentJsonl(currentDir, [
       runLine,
+      scopeLine('src/fixed.ts', ['old2']),
+      scopeLine('src/gap.ts', ['old3']),
+      scopeLine('src/new.ts', ['new1']),
+      scopeLine('src/old.ts', ['old1']),
       currentSurvivor,
       newSurvivor,
       nowUnverified,
@@ -179,8 +202,150 @@ describe('gate: --baseline', () => {
     const summary = lines[lines.length - 1];
     assert.equal(summary.newSurvivors, 1);
     assert.equal(summary.fixedSurvivors, 1);
+    assert.equal(summary.outOfScope, 0);
     // Exit code 3: `nowUnverified` outranks the new survivor.
     assert.equal(result.exitCode, 3);
+  });
+
+  it('marks an absent in-scope survivor fixed and an absent out-of-scope survivor', () => {
+    const baselineDir = mkdtempSync(path.join(tmpdir(), 'gate-baseline-scope-base-'));
+    const currentDir = mkdtempSync(path.join(tmpdir(), 'gate-baseline-scope-current-'));
+    const survivorA = survivor({ key: 'A' });
+    const survivorB = survivor({ key: 'B' });
+    const baselineFile = writeAgentJsonl(baselineDir, [runLine, survivorA, survivorB, summaryLine]);
+    const currentFile = writeAgentJsonl(currentDir, [
+      runLine,
+      scopeLine('src/a.ts', ['A']),
+      summaryLine,
+    ]);
+
+    const result = runGate(
+      { input: currentFile, baseline: baselineFile, format: 'jsonl' },
+      currentDir,
+    );
+    const lines = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(lines.filter((line) => line.kind === 'fixedSurvivor'), [{
+      kind: 'fixedSurvivor',
+      key: 'A',
+      file: 'src/a.ts',
+      mutatorName: 'ArithmeticOperator',
+      original: 'x + 1',
+      replacement: 'x - 1',
+      location: { start: { line: 2, column: 10 }, end: { line: 2, column: 15 } },
+    }]);
+    assert.deepEqual(lines.filter((line) => line.kind === 'outOfScope'), [{
+      kind: 'outOfScope',
+      key: 'B',
+      file: 'src/a.ts',
+      mutatorName: 'ArithmeticOperator',
+      original: 'x + 1',
+      replacement: 'x - 1',
+      location: { start: { line: 2, column: 10 }, end: { line: 2, column: 15 } },
+    }]);
+    const summary = lines[lines.length - 1];
+    assert.equal(summary.fixedSurvivors, 1);
+    assert.equal(summary.outOfScope, 1);
+    assert.equal(result.exitCode, 0);
+
+    const textResult = runGate(
+      { input: currentFile, baseline: baselineFile, format: 'text' },
+      currentDir,
+    );
+    assert.match(textResult.stdout, /summary: .*outOfScope=1/);
+  });
+
+  it('marks both survivors out of scope when the file has no scope line', () => {
+    const baselineDir = mkdtempSync(path.join(tmpdir(), 'gate-baseline-no-scope-base-'));
+    const currentDir = mkdtempSync(path.join(tmpdir(), 'gate-baseline-no-scope-current-'));
+    const baselineFile = writeAgentJsonl(baselineDir, [
+      runLine,
+      survivor({ key: 'A' }),
+      survivor({ key: 'B' }),
+      summaryLine,
+    ]);
+    const currentFile = writeAgentJsonl(currentDir, [runLine, summaryLine]);
+
+    const result = runGate(
+      { input: currentFile, baseline: baselineFile, format: 'jsonl' },
+      currentDir,
+    );
+    const lines = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(
+      lines.filter((line) => line.kind === 'outOfScope').map((line) => line.key),
+      ['A', 'B'],
+    );
+    assert.equal(lines.some((line) => line.kind === 'fixedSurvivor'), false);
+    assert.equal(lines[lines.length - 1].outOfScope, 2);
+    assert.equal(result.exitCode, 0);
+  });
+
+  it('does not classify a pending baseline survivor', () => {
+    const baselineDir = mkdtempSync(path.join(tmpdir(), 'gate-baseline-pending-base-'));
+    const currentDir = mkdtempSync(path.join(tmpdir(), 'gate-baseline-pending-current-'));
+    const baselineFile = writeAgentJsonl(baselineDir, [runLine, survivor({ key: 'K' }), summaryLine]);
+    const currentFile = writeAgentJsonl(currentDir, [
+      runLine,
+      scopeLine('src/a.ts', ['K'], ['K']),
+      summaryLine,
+    ]);
+
+    const result = runGate(
+      { input: currentFile, baseline: baselineFile, format: 'jsonl' },
+      currentDir,
+    );
+    const lines = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(lines.some((line) => line.kind === 'fixedSurvivor'), false);
+    assert.equal(lines.some((line) => line.kind === 'outOfScope'), false);
+    assert.equal(lines[lines.length - 1].fixedSurvivors, 0);
+    assert.equal(lines[lines.length - 1].outOfScope, 0);
+    assert.equal(result.exitCode, 0);
+  });
+
+  it('marks an in-scope timeout as a fixed baseline survivor', () => {
+    const baselineDir = mkdtempSync(path.join(tmpdir(), 'gate-baseline-timeout-base-'));
+    const currentDir = mkdtempSync(path.join(tmpdir(), 'gate-baseline-timeout-current-'));
+    const baselineFile = writeAgentJsonl(baselineDir, [runLine, survivor({ key: 'K' }), summaryLine]);
+    const currentFile = writeAgentJsonl(currentDir, [
+      runLine,
+      scopeLine('src/a.ts', ['K']),
+      survivor({ kind: 'timeout', key: 'K' }),
+      summaryLine,
+    ]);
+
+    const result = runGate(
+      { input: currentFile, baseline: baselineFile, format: 'jsonl' },
+      currentDir,
+    );
+    const lines = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(lines.filter((line) => line.kind === 'fixedSurvivor').map((line) => line.key), ['K']);
+    assert.equal(lines.some((line) => line.kind === 'outOfScope'), false);
+    assert.equal(result.exitCode, 0);
+  });
+
+  it('rejects schema version 2 in the input and baseline files', () => {
+    const inputDir = mkdtempSync(path.join(tmpdir(), 'gate-schema-input-'));
+    const currentDir = mkdtempSync(path.join(tmpdir(), 'gate-schema-current-'));
+    const baselineDir = mkdtempSync(path.join(tmpdir(), 'gate-schema-baseline-'));
+    const oldRunLine = { ...runLine, schemaVersion: '2' };
+    const oldInput = writeAgentJsonl(inputDir, [oldRunLine, summaryLine]);
+    const inputResult = runGate(baseArgs(oldInput), inputDir);
+    assert.equal(inputResult.exitCode, 2);
+    assert.equal(
+      inputResult.stderr,
+      `usage error: ${oldInput} has schemaVersion 2; gate reads 3. Rebuild it with convert from its mutation.json\n`,
+    );
+
+    const currentInput = writeAgentJsonl(currentDir, [runLine, summaryLine]);
+    const oldBaseline = writeAgentJsonl(baselineDir, [oldRunLine, survivor(), summaryLine]);
+    const baselineResult = runGate(
+      { input: currentInput, baseline: oldBaseline, format: 'jsonl' },
+      currentDir,
+    );
+    assert.equal(baselineResult.exitCode, 2);
+    assert.equal(
+      baselineResult.stderr,
+      `usage error: ${oldBaseline} has schemaVersion 2; gate reads 3. Rebuild it with convert from its mutation.json\n`,
+    );
   });
 });
 
@@ -189,6 +354,32 @@ describe('gate: --since', { skip: !gitAvailable && 'git is not installed' }, () 
     spawnSync('git', ['init', '-q'], { cwd: dir });
     spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
     spawnSync('git', ['config', 'user.name', 'Test'], { cwd: dir });
+  }
+
+  function noCoverageWithStaleScope() {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gate-since-nocoverage-stale-'));
+    initRepo(dir);
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    writeFileSync(path.join(dir, 'src', 'f.ts'), 'export const a = true;\n');
+    spawnSync('git', ['add', '.'], { cwd: dir });
+    spawnSync('git', ['commit', '-q', '-m', 'initial'], { cwd: dir });
+    const ref = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    const noCoverage = {
+      kind: 'noCoverage',
+      key: 'N',
+      file: 'src/f.ts',
+      location: { start: { line: 1, column: 17 }, end: { line: 1, column: 21 } },
+      mutatorName: 'BooleanLiteral',
+      replacement: 'false',
+      original: 'true',
+    };
+    const file = writeAgentJsonl(dir, [
+      runLine,
+      scopeLine('src/f.ts', ['N'], [], '0000000000000000'),
+      noCoverage,
+      { ...summaryLine, noCoverage: 1 },
+    ]);
+    return { dir, ref, file };
   }
 
   it('scopes survivors to a changed-line range', () => {
@@ -211,7 +402,13 @@ describe('gate: --since', { skip: !gitAvailable && 'git is not installed' }, () 
 
     const changedSurvivor = survivor({ key: 'sc', file: 'src/f.ts', location: { start: { line: 2, column: 10 }, end: { line: 2, column: 19 } }, sourceHash: hash });
     const unchangedSurvivor = survivor({ key: 'su', file: 'src/f.ts', location: { start: { line: 6, column: 10 }, end: { line: 6, column: 17 } }, sourceHash: hash });
-    const file = writeAgentJsonl(dir, [runLine, changedSurvivor, unchangedSurvivor, summaryLine]);
+    const file = writeAgentJsonl(dir, [
+      runLine,
+      scopeLine('src/f.ts', ['sc', 'su'], [], hash),
+      changedSurvivor,
+      unchangedSurvivor,
+      summaryLine,
+    ]);
 
     const result = runGate({ input: file, since: ref, format: 'jsonl' }, dir);
     const lines = result.stdout.trim().split('\n').map((l) => JSON.parse(l));
@@ -237,7 +434,12 @@ describe('gate: --since', { skip: !gitAvailable && 'git is not installed' }, () 
     );
 
     const s = survivor({ key: 'sn', file: 'src/new.ts', location: { start: { line: 2, column: 10 }, end: { line: 2, column: 15 } }, sourceHash: hash });
-    const file = writeAgentJsonl(dir, [runLine, s, summaryLine]);
+    const file = writeAgentJsonl(dir, [
+      runLine,
+      scopeLine('src/new.ts', ['sn'], [], hash),
+      s,
+      summaryLine,
+    ]);
 
     const result = runGate({ input: file, since: ref, format: 'jsonl' }, dir);
     const lines = result.stdout.trim().split('\n').map((l) => JSON.parse(l));
@@ -255,14 +457,104 @@ describe('gate: --since', { skip: !gitAvailable && 'git is not installed' }, () 
     writeFileSync(path.join(dir, 'src', 'f.ts'), 'export const a = 999;\n');
 
     const s = survivor({ key: 'sf', file: 'src/f.ts', sourceHash: 'not-the-real-hash-0' });
-    const file = writeAgentJsonl(dir, [runLine, s, summaryLine]);
+    const file = writeAgentJsonl(dir, [
+      runLine,
+      scopeLine('src/f.ts', ['sf'], [], 'not-the-real-hash-0'),
+      s,
+      summaryLine,
+    ]);
 
     const result = runGate({ input: file, since: ref, format: 'jsonl' }, dir);
     assert.equal(result.exitCode, 3);
     const lines = result.stdout.trim().split('\n').map((l) => JSON.parse(l));
-    assert.equal(lines[1].kind, 'stale');
-    assert.equal(lines[1].file, 'src/f.ts');
+    assert.equal(lines[1].kind, 'scope');
+    assert.equal(lines[2].kind, 'stale');
+    assert.equal(lines[2].file, 'src/f.ts');
     assert.match(result.stderr, /warning: src\/f\.ts/);
+  });
+
+  it('marks a noCoverage-only file stale from its scope hash', () => {
+    const { dir, ref, file } = noCoverageWithStaleScope();
+    const result = runGate({ input: file, since: ref, format: 'jsonl' }, dir);
+    const lines = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(lines.filter((line) => line.kind === 'stale'), [{
+      kind: 'stale',
+      file: 'src/f.ts',
+      reason: 'source no longer matches the report; cannot scope by line',
+    }]);
+    assert.equal(result.exitCode, 3);
+  });
+
+  it('writes scope lines after run and before stale lines in JSONL output', () => {
+    const { dir, ref, file } = noCoverageWithStaleScope();
+    const result = runGate({ input: file, since: ref, format: 'jsonl' }, dir);
+    const lines = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(lines.map((line) => line.kind), ['run', 'scope', 'stale', 'summary']);
+  });
+
+  it('does not mark a file stale when every mutant of it was killed', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gate-since-all-killed-'));
+    initRepo(dir);
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    writeFileSync(path.join(dir, 'src', 'f.ts'), 'export const a = 1;\n');
+    spawnSync('git', ['add', '.'], { cwd: dir });
+    spawnSync('git', ['commit', '-q', '-m', 'initial'], { cwd: dir });
+    const ref = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    writeFileSync(path.join(dir, 'src', 'f.ts'), 'export const a = 2;\n');
+
+    const file = writeAgentJsonl(dir, [
+      runLine,
+      scopeLine('src/f.ts', ['K'], [], '0000000000000000'),
+      { ...summaryLine, killed: 1, survived: 0 },
+    ]);
+
+    const result = runGate({ input: file, since: ref, format: 'jsonl' }, dir);
+    const lines = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(lines.map((line) => line.kind), ['run', 'scope', 'summary']);
+    assert.equal(result.exitCode, 0);
+  });
+
+  it('does not call a survivor fixed when --since leaves it out of the changed lines', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'gate-since-baseline-'));
+    initRepo(dir);
+    mkdirSync(path.join(dir, 'src'), { recursive: true });
+    writeFileSync(
+      path.join(dir, 'src', 'f.ts'),
+      'export function a(x) {\n  return x + 1;\n}\n\nexport function b(x) {\n  return x + 2;\n}\n',
+    );
+    spawnSync('git', ['add', '.'], { cwd: dir });
+    spawnSync('git', ['commit', '-q', '-m', 'initial'], { cwd: dir });
+    const ref = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    const changed =
+      'export function a(x) {\n  return x + 100;\n}\n\nexport function b(x) {\n  return x + 2;\n}\n';
+    writeFileSync(path.join(dir, 'src', 'f.ts'), changed);
+    const hash = createHash('sha256').update(changed).digest('hex').slice(0, 16);
+
+    const onChangedLine = survivor({ key: 'sc', file: 'src/f.ts', location: { start: { line: 2, column: 10 }, end: { line: 2, column: 19 } }, sourceHash: hash });
+    const onUnchangedLine = survivor({ key: 'su', file: 'src/f.ts', location: { start: { line: 6, column: 10 }, end: { line: 6, column: 17 } }, sourceHash: hash });
+    const current = writeAgentJsonl(dir, [
+      runLine,
+      scopeLine('src/f.ts', ['sc', 'su'], [], hash),
+      onChangedLine,
+      onUnchangedLine,
+      summaryLine,
+    ]);
+    const baselineDir = mkdtempSync(path.join(tmpdir(), 'gate-since-baseline-base-'));
+    const baseline = writeAgentJsonl(baselineDir, [
+      runLine,
+      scopeLine('src/f.ts', ['sc', 'su'], [], hash),
+      onChangedLine,
+      onUnchangedLine,
+      summaryLine,
+    ]);
+
+    const result = runGate({ input: current, since: ref, baseline, format: 'jsonl' }, dir);
+    const lines = result.stdout.trim().split('\n').map((line) => JSON.parse(line));
+    assert.deepEqual(lines.filter((line) => line.kind === 'fixedSurvivor'), []);
+    assert.deepEqual(lines.filter((line) => line.kind === 'outOfScope'), []);
+    const summary = lines[lines.length - 1];
+    assert.equal(summary.fixedSurvivors, 0);
+    assert.equal(summary.outOfScope, 0);
   });
 
   it('exits 2 for an unknown git ref', () => {

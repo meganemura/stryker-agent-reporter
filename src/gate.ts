@@ -20,8 +20,12 @@ export class GateUsageError extends Error {}
 /** One line of `agent.jsonl`, loosely typed: every field this module reads, plus whatever else the line carries. */
 interface GateLine {
   kind: string;
+  schemaVersion?: unknown;
   key?: string;
   file?: string;
+  keys?: string[];
+  pending?: string[];
+  sourceHash?: string;
   location?: {
     start: { line: number; column: number };
     end: { line: number; column: number };
@@ -29,7 +33,6 @@ interface GateLine {
   mutatorName?: string;
   replacement?: string;
   original?: string;
-  sourceHash?: string;
   patch?: string;
   rerun?: string;
   rerunExact?: string;
@@ -37,6 +40,22 @@ interface GateLine {
   [field: string]: unknown;
 }
 
+interface FileScope {
+  keys: Set<string>;
+  pending: Set<string>;
+  sourceHash?: string;
+}
+
+interface BaselineSurvivorFields {
+  key: string;
+  file: string;
+  mutatorName: string;
+  original: string;
+  replacement: string | undefined;
+  location: GateLine['location'];
+}
+
+const GATE_SCHEMA_VERSION = '3';
 const SCOPED_KINDS = new Set(['survivor', 'unverified', 'timeout', 'noCoverage']);
 
 function sourceHash(source: string): string {
@@ -124,9 +143,7 @@ export interface ScopeResult {
  * --unified=0 <ref> -- <file>` reports for every file a scoped kind names,
  * and the set of files whose current on-disk content no longer matches a
  * recorded `sourceHash` (so the caller must drop them, not filter them on a
- * stale line number). A file with no recorded `sourceHash` in this run
- * (only `noCoverage` entries, none of them carrying one) skips that check
- * and is scoped on `git diff` alone.
+ * stale line number). Each file needs a scope line with its source hash.
  */
 export function scopeSince(
   files: readonly string[],
@@ -139,6 +156,10 @@ export function scopeSince(
 
   for (const file of files) {
     const recordedHash = hashByFile.get(file);
+    if (recordedHash === undefined) {
+      staleFiles.set(file, 'source hash is missing from the report; cannot scope by line');
+      continue;
+    }
     let currentContent: string;
     try {
       currentContent = readFileSync(`${cwd}/${file}`, 'utf8');
@@ -146,7 +167,7 @@ export function scopeSince(
       staleFiles.set(file, `cannot read ${file}: ${(err as Error).message}`);
       continue;
     }
-    if (recordedHash !== undefined && sourceHash(currentContent) !== recordedHash) {
+    if (sourceHash(currentContent) !== recordedHash) {
       staleFiles.set(
         file,
         'source no longer matches the report; cannot scope by line',
@@ -294,7 +315,29 @@ function parseJsonl(text: string): GateLine[] {
     .map((line) => JSON.parse(line) as GateLine);
 }
 
-function readBaselineSurvivorKeys(path: string): Set<string> {
+function readFileScopes(lines: GateLine[]): Map<string, FileScope> {
+  const scopes = new Map<string, FileScope>();
+  for (const line of lines) {
+    if (line.kind !== 'scope' || !line.file) continue;
+    scopes.set(line.file, {
+      keys: new Set(line.keys ?? []),
+      pending: new Set(line.pending ?? []),
+      sourceHash: line.sourceHash,
+    });
+  }
+  return scopes;
+}
+
+function schemaVersionError(path: string, lines: GateLine[]): string | undefined {
+  const runLine = lines.find((line) => line.kind === 'run');
+  if (runLine?.schemaVersion === GATE_SCHEMA_VERSION) return undefined;
+  const version = runLine?.schemaVersion === undefined
+    ? 'missing'
+    : String(runLine.schemaVersion);
+  return `usage error: ${path} has schemaVersion ${version}; gate reads ${GATE_SCHEMA_VERSION}. Rebuild it with convert from its mutation.json\n`;
+}
+
+function readBaselineSurvivors(path: string): GateLine[] {
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
@@ -307,14 +350,11 @@ function readBaselineSurvivorKeys(path: string): Set<string> {
   } catch (err) {
     throw new GateUsageError(`cannot parse ${path} as JSONL: ${(err as Error).message}`);
   }
-  return new Set(
-    lines.filter((l) => l.kind === 'survivor').map((l) => l.key ?? ''),
-  );
-}
-
-function readBaselineSurvivors(path: string): GateLine[] {
-  const text = readFileSync(path, 'utf8');
-  return parseJsonl(text).filter((l) => l.kind === 'survivor');
+  const versionError = schemaVersionError(path, lines);
+  if (versionError) {
+    throw new GateUsageError(versionError.slice('usage error: '.length).trimEnd());
+  }
+  return lines.filter((line) => line.kind === 'survivor');
 }
 
 /**
@@ -334,20 +374,37 @@ export function runGate(args: GateArgs, cwd: string): GateResult {
   } catch (err) {
     return { exitCode: 2, stdout: '', stderr: `usage error: cannot parse ${args.input} as JSONL: ${(err as Error).message}\n` };
   }
-  if (lines.length === 0 || lines[lines.length - 1].kind !== 'summary') {
-    return {
-      exitCode: 3,
-      stdout: '',
-      stderr: `${args.input} has no summary line; the run did not finish\n`,
-    };
+  const unfinished = {
+    exitCode: 3,
+    stdout: '',
+    stderr: `${args.input} has no summary line; the run did not finish\n`,
+  };
+  // An empty file carries no `run` line to read a version from. It is an
+  // unfinished run, as it was before the version check existed.
+  if (lines.length === 0) {
+    return unfinished;
+  }
+  const versionError = schemaVersionError(args.input, lines);
+  if (versionError) {
+    return { exitCode: 2, stdout: '', stderr: versionError };
+  }
+  if (lines[lines.length - 1].kind !== 'summary') {
+    return unfinished;
   }
 
   const runLine = lines.find((l) => l.kind === 'run');
   const summaryLine = lines[lines.length - 1];
+  const fileScopes = readFileScopes(lines);
   let survivors = lines.filter((l) => l.kind === 'survivor');
   let unverified = lines.filter((l) => l.kind === 'unverified');
   let timeouts = lines.filter((l) => l.kind === 'timeout');
   let noCoverage = lines.filter((l) => l.kind === 'noCoverage');
+
+  // Taken before `--since` filters the lists below. A baseline survivor that
+  // this run still reports on an unchanged line, or in a stale file, is still
+  // a survivor: reading the filtered lists would call it fixed.
+  const reportedSurvivorKeys = new Set(survivors.map((s) => s.key ?? ''));
+  const reportedUnverifiedKeys = new Set(unverified.map((u) => u.key ?? ''));
 
   let stale: Array<{ file: string; reason: string }> = [];
   let stderr = '';
@@ -361,11 +418,11 @@ export function runGate(args: GateArgs, cwd: string): GateResult {
     }
     const scopedFiles = new Set<string>();
     const hashByFile = new Map<string, string>();
+    for (const [file, scope] of fileScopes) {
+      if (scope.sourceHash !== undefined) hashByFile.set(file, scope.sourceHash);
+    }
     for (const item of [...survivors, ...unverified, ...timeouts, ...noCoverage]) {
       if (item.file) scopedFiles.add(item.file);
-      if (item.file && item.sourceHash && !hashByFile.has(item.file)) {
-        hashByFile.set(item.file, item.sourceHash);
-      }
     }
     const { changedRangesByFile, staleFiles } = scopeSince(
       [...scopedFiles],
@@ -392,13 +449,12 @@ export function runGate(args: GateArgs, cwd: string): GateResult {
   }
 
   let newSurvivors: GateLine[] | undefined;
-  let fixedSurvivors: Array<{ key: string; file: string; mutatorName: string; original: string; replacement: string | undefined; location: unknown }> | undefined;
+  let fixedSurvivors: BaselineSurvivorFields[] | undefined;
+  let outOfScope: BaselineSurvivorFields[] | undefined;
 
   if (args.baseline) {
-    let baselineKeys: Set<string>;
     let baselineSurvivors: GateLine[];
     try {
-      baselineKeys = readBaselineSurvivorKeys(args.baseline);
       baselineSurvivors = readBaselineSurvivors(args.baseline);
     } catch (err) {
       if (err instanceof GateUsageError) {
@@ -406,23 +462,29 @@ export function runGate(args: GateArgs, cwd: string): GateResult {
       }
       throw err;
     }
+    const baselineKeys = new Set(baselineSurvivors.map((line) => line.key ?? ''));
     newSurvivors = survivors.filter((s) => !baselineKeys.has(s.key ?? ''));
-    const currentSurvivorKeys = new Set(survivors.map((s) => s.key ?? ''));
-    const currentUnverifiedKeys = new Set(unverified.map((u) => u.key ?? ''));
-    fixedSurvivors = baselineSurvivors
-      .filter(
-        (b) =>
-          !currentSurvivorKeys.has(b.key ?? '') &&
-          !currentUnverifiedKeys.has(b.key ?? ''),
-      )
-      .map((b) => ({
-        key: b.key ?? '',
-        file: b.file ?? '',
-        mutatorName: b.mutatorName ?? '',
-        original: b.original ?? '',
-        replacement: b.replacement,
-        location: b.location,
-      }));
+    fixedSurvivors = [];
+    outOfScope = [];
+    for (const baseline of baselineSurvivors) {
+      const key = baseline.key ?? '';
+      if (reportedSurvivorKeys.has(key) || reportedUnverifiedKeys.has(key)) continue;
+      const scope = fileScopes.get(baseline.file ?? '');
+      if (scope?.pending.has(key)) continue;
+      const fields: BaselineSurvivorFields = {
+        key,
+        file: baseline.file ?? '',
+        mutatorName: baseline.mutatorName ?? '',
+        original: baseline.original ?? '',
+        replacement: baseline.replacement,
+        location: baseline.location,
+      };
+      if (scope?.keys.has(key)) {
+        fixedSurvivors.push(fields);
+      } else {
+        outOfScope.push(fields);
+      }
+    }
   }
 
   const staticTimeoutCount = timeouts.filter((t) => t.static === true).length;
@@ -442,15 +504,29 @@ export function runGate(args: GateArgs, cwd: string): GateResult {
     exitCode = 0;
   }
 
+  const outSummary: Record<string, unknown> = { ...summaryLine };
+  if (args.since) {
+    outSummary.scoped = true;
+    outSummary.staleCount = stale.length;
+  }
+  if (args.baseline) {
+    outSummary.newSurvivors = newSurvivors?.length ?? 0;
+    outSummary.fixedSurvivors = fixedSurvivors?.length ?? 0;
+    outSummary.outOfScope = outOfScope?.length ?? 0;
+  }
+
   let body: string;
   if (args.format === 'github') {
     body = formatGithub(survivors, noCoverage, unverified, stale).join('\n');
   } else if (args.format === 'text') {
-    body = formatText(survivors, unverified, timeouts, noCoverage, stale, summaryLine);
+    body = formatText(survivors, unverified, timeouts, noCoverage, stale, outSummary);
   } else {
     const newKeys = newSurvivors ? new Set(newSurvivors.map((s) => s.key)) : undefined;
     const outLines: unknown[] = [];
     if (runLine) outLines.push(runLine);
+    for (const scope of lines.filter((line) => line.kind === 'scope')) {
+      outLines.push(scope);
+    }
     for (const s of stale) {
       outLines.push({ kind: 'stale', ...s });
     }
@@ -465,14 +541,10 @@ export function runGate(args: GateArgs, cwd: string): GateResult {
         outLines.push({ kind: 'fixedSurvivor', ...f });
       }
     }
-    const outSummary: Record<string, unknown> = { ...summaryLine };
-    if (args.since) {
-      outSummary.scoped = true;
-      outSummary.staleCount = stale.length;
-    }
-    if (args.baseline) {
-      outSummary.newSurvivors = newSurvivors?.length ?? 0;
-      outSummary.fixedSurvivors = fixedSurvivors?.length ?? 0;
+    if (outOfScope) {
+      for (const line of outOfScope) {
+        outLines.push({ kind: 'outOfScope', ...line });
+      }
     }
     outLines.push(outSummary);
     body = outLines.map((line) => JSON.stringify(line)).join('\n');
