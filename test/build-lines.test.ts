@@ -72,11 +72,13 @@ describe('source-bound mutant keys', () => {
     for (const { path, source, sites } of cases) {
       const fullKeys = buildScopeLine(sourceFile(path, source), sites).keys;
       for (let mask = 0; mask < 2 ** sites.length; mask++) {
-        it(`keeps keys for subset ${path} mask ${mask}`, () => {
-          const selected = sites.filter((_, index) => (mask & (1 << index)) !== 0);
-          const expected = fullKeys.filter((_, index) => (mask & (1 << index)) !== 0);
-          assert.deepEqual(buildScopeLine(sourceFile(path, source), selected).keys, expected);
-        });
+        const selected = sites.filter((_, index) => (mask & (1 << index)) !== 0);
+        const expected = fullKeys.filter((_, index) => (mask & (1 << index)) !== 0);
+        assert.deepEqual(
+          buildScopeLine(sourceFile(path, source), selected).keys,
+          expected,
+          `subset ${path} mask ${mask}`,
+        );
       }
     }
   });
