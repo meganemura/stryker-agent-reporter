@@ -2,14 +2,15 @@
  * Responsibility: build the ordered list of JSON-Lines values a finished
  * mutation-testing run produces, from a Stryker report and its metrics
  * alone. Both `AgentReporter` (run live, inside Stryker) and the `convert`
- * command (run later, from a saved `mutation.json`) call this module so a
- * mutant's key is computed by one function, not two.
+ * command (run later, from a saved `mutation.json`) call this module, so a
+ * mutant's key and a file's scope line are each computed by one function,
+ * not two.
  * Boundary: this module only reads a `schema.MutationTestResult`, a
- * `MutationTestMetricsResult`, and a small run-info object; it writes
- * nothing and has no dependency on `@stryker-mutator/core` internals.
- * `writeFile`, `normalizeReportFileName`, and the partial-file logic stay
- * in `agent-reporter.ts`: `convert` never writes a partial file, so they
- * are not shared.
+ * `MutationTestMetricsResult`, a file's source text, a small run-info
+ * object, and the installed Stryker version; it writes nothing and has no dependency on `@stryker-mutator/core`
+ * internals. `writeFile`, `normalizeReportFileName`, and the partial-file
+ * logic stay in `agent-reporter.ts`: `convert` never writes a partial file,
+ * so they are not shared.
  */
 
 import { createHash } from 'node:crypto';
@@ -27,12 +28,15 @@ import type {
 } from 'mutation-testing-metrics';
 
 /**
- * Bumped from `'1'` (a single JSON object) because the output shape
- * changed to JSON Lines: a run line, one line per actionable mutant, and a
- * summary line, so a run that stops early still leaves a readable,
- * partial file behind.
+ * Bumped from `'1'` (a single JSON object) to `'2'` when the output became
+ * JSON Lines: a run line, one line per actionable mutant, and a summary
+ * line, so a run that stops early still leaves a readable, partial file
+ * behind. Bumped to `'3'` because a key now comes from `sourceFile(...).keyOf`
+ * and differs from every version-2 key of the same mutant, and because the
+ * file gains `scope` lines. `gate` reads only this version, so a baseline
+ * with old keys is refused instead of matched wrongly.
  */
-export const SCHEMA_VERSION = '2';
+export const SCHEMA_VERSION = '3';
 
 /**
  * Stryker's own default (`tempDirName` in `stryker-schema.json`). `convert`
@@ -116,11 +120,66 @@ export interface Summary {
   mutationScoreBasedOnCoveredCode: number;
 }
 
-/** The run-line fields `buildAgentReportLines`'s caller supplies, not read from `report`/`metrics`. */
+/**
+ * The run-line fields `buildAgentReportLines`'s caller supplies, not read
+ * from `report`/`metrics`. `mutate` and `incremental` are an echo of the
+ * options the run used, written only when the caller knows them. They are not
+ * evidence of what the run generated: the `scope` lines are. `convert`
+ * reads them from `report.config`, which a report from another producer
+ * can lack, so a reader must not rely on their presence.
+ */
 export interface RunInfo {
   disableBail: boolean;
   concurrency?: number | string | undefined;
+  mutate?: string[] | undefined;
+  incremental?: boolean | undefined;
   tempDirName: string;
+}
+
+/**
+ * One mutant, as far as its key is concerned: where it is and what it does.
+ * A report's `MutantResult` and a plan's mutant (after its location is made
+ * 1-based) both fit this shape. It names no other mutant, so a key cannot
+ * depend on which mutants a run planned.
+ */
+export interface MutantSite {
+  readonly location: schema.Location;
+  readonly mutatorName: string;
+  readonly replacement: string | undefined;
+}
+
+/**
+ * One file's source, indexed once. Everything a mutant's key and its
+ * `original` text need from the file comes through this object, so the
+ * live reporter (source read from disk at plan time) and `convert` (source
+ * read from the report) key a mutant with the same code.
+ */
+export interface SourceFile {
+  readonly path: string;
+  readonly sourceHash: string;
+  keyOf(site: MutantSite): string;
+  /** The exact source text the mutant replaces: the range itself, as written. */
+  originalOf(location: schema.Location): string;
+}
+
+/**
+ * Lists the key of every mutant Stryker generated for one file, whatever its
+ * status. A `Killed` mutant has no line of its own, so this list is what
+ * tells a reader "generated and killed" from "outside the `mutate` range".
+ */
+export interface ScopeLine {
+  kind: 'scope';
+  file: string;
+  sourceHash: string;
+  keys: string[];
+}
+
+/**
+ * The final file's scope line. `pending` is known only once every result is
+ * in, so the partial file's scope line (a plain `ScopeLine`) lacks it.
+ */
+export interface CompletedScopeLine extends ScopeLine {
+  pending: string[];
 }
 
 /**
@@ -149,6 +208,10 @@ export function buildRunLine(runInfo: RunInfo): Record<string, unknown> {
     strykerVersion: readStrykerVersion(),
     disableBail: runInfo.disableBail,
     concurrency: runInfo.concurrency,
+    ...(runInfo.mutate === undefined ? {} : { mutate: runInfo.mutate }),
+    ...(runInfo.incremental === undefined
+      ? {}
+      : { incremental: runInfo.incremental }),
   };
 }
 
@@ -156,6 +219,161 @@ function compareStrings(a: string, b: string): number {
   if (a < b) return -1;
   if (a > b) return 1;
   return 0;
+}
+
+/**
+ * 1-based line number to the byte offset of that line's first character.
+ * Index 0 is unused, matching `mutation-testing-metrics`' own line map, so
+ * `lineMap[location.start.line]` needs no further shift.
+ */
+function computeLineMap(source: string): number[] {
+  const result = [0];
+  let lineStart = 0;
+  let pos = 0;
+  while (pos < source.length) {
+    const ch = source.charCodeAt(pos);
+    pos++;
+    if (ch === 13) {
+      if (source.charCodeAt(pos) === 10) {
+        pos++;
+      }
+      result.push(lineStart);
+      lineStart = pos;
+    } else if (ch === 10 || ch === 0x2028 || ch === 0x2029) {
+      result.push(lineStart);
+      lineStart = pos;
+    }
+  }
+  result.push(lineStart);
+  return result;
+}
+
+/**
+ * Indexes a file's whole source. A mutant's key is computed from `(path,
+ * source, site)` and nothing else, so no `--mutate` range can change it: a
+ * range changes which mutants exist, not the source they sit in. The 0.1.0
+ * key counted its two ordinals over the planned mutants, so a narrower range
+ * changed a key, and a column range could hand one mutant another's key.
+ *
+ * The hash input, in order:
+ * - `window`: the line or lines the range covers, each trimmed, joined with
+ *   '\n'. The trim also drops the line's own terminator (`\r`, `\n`,
+ *   `U+2028`, `U+2029`), since the line map marks where a line starts, not
+ *   where it ends. The text of the range alone does not tell mutants apart:
+ *   measured with the 0.1.0 key on one 14,140-mutant report, 30% of (file,
+ *   original, mutatorName, replacement) tuples collided, and adding the
+ *   whole line cut that to 8%.
+ * - the start and end of the range, counted from the first non-blank
+ *   character of their line. They tell two mutants on one line apart (the
+ *   two `+` of `a + a`), and they keep the key when a whole block is
+ *   re-indented.
+ * - `mutatorName` and `replacement`.
+ * - `windowOrdinal`: how many earlier copies of the same window the file
+ *   holds. It is a count of source lines, not of mutants, which is why it
+ *   does not depend on the plan. It is always hashed, also when it is 0:
+ *   the 0.1.0 repeat ordinal was hashed only when a second planned mutant
+ *   existed, and a narrow range removed that second mutant.
+ *
+ * Limits: an edit to the window changes the key (a change to its leading
+ * or trailing blanks does not); a copy of the window added above shifts
+ * `windowOrdinal`, so the key moves to a different copy; two mutants with
+ * one location, mutator, and replacement share a key.
+ * `original` is not hashed: `window` and the two offsets already fix it.
+ */
+export function sourceFile(path: string, source: string): SourceFile {
+  const lineMap = computeLineMap(source);
+  const trimmedLines: string[] = [];
+  const indentation: number[] = [];
+  const linesByText = new Map<string, number[]>();
+
+  for (let line = 1; line < lineMap.length; line++) {
+    const start = lineMap[line];
+    const end = line + 1 < lineMap.length ? lineMap[line + 1] : source.length;
+    const raw = source.slice(start, end);
+    const trimmed = raw.trim();
+    trimmedLines[line] = trimmed;
+    indentation[line] = raw.length - raw.trimStart().length;
+    const matchingLines = linesByText.get(trimmed);
+    if (matchingLines) {
+      matchingLines.push(line);
+    } else {
+      linesByText.set(trimmed, [line]);
+    }
+  }
+
+  const windowAt = (startLine: number, endLine: number): string => {
+    const lines: string[] = [];
+    for (let line = startLine; line <= endLine; line++) {
+      lines.push(trimmedLines[line] ?? '');
+    }
+    return lines.join('\n');
+  };
+
+  const keyOf = (site: MutantSite): string => {
+    const { start, end } = site.location;
+    const window = windowAt(start.line, end.line);
+    let windowOrdinal = 0;
+    for (const candidate of linesByText.get(trimmedLines[start.line] ?? '') ?? []) {
+      if (candidate >= start.line) {
+        break;
+      }
+      const matchesWindow = Array.from(
+        { length: end.line - start.line + 1 },
+        (_, index) => trimmedLines[candidate + index] === trimmedLines[start.line + index],
+      ).every(Boolean);
+      if (matchesWindow) {
+        windowOrdinal++;
+      }
+    }
+
+    const input = [
+      path,
+      window,
+      String(start.column - 1 - (indentation[start.line] ?? 0)),
+      String(end.column - 1 - (indentation[end.line] ?? 0)),
+      site.mutatorName,
+      site.replacement ?? '',
+      String(windowOrdinal),
+    ].join('\0');
+    return createHash('sha1').update(input).digest('hex').slice(0, 12);
+  };
+
+  const originalOf = (location: schema.Location): string =>
+    source.substring(
+      lineMap[location.start.line] + location.start.column - 1,
+      lineMap[location.end.line] + location.end.column - 1,
+    );
+
+  return {
+    path,
+    sourceHash: createHash('sha256').update(source).digest('hex').slice(0, 16),
+    keyOf,
+    originalOf,
+  };
+}
+
+/**
+ * Builds the scope line for the given sites, keys in position order
+ * (line, column, mutatorName, replacement) so the same sites always
+ * serialize to the same bytes, whatever order the caller holds them in.
+ */
+export function buildScopeLine(
+  file: SourceFile,
+  sites: readonly MutantSite[],
+): ScopeLine {
+  const orderedSites = [...sites].sort(
+    (a, b) =>
+      a.location.start.line - b.location.start.line ||
+      a.location.start.column - b.location.start.column ||
+      compareStrings(a.mutatorName, b.mutatorName) ||
+      compareStrings(a.replacement ?? '', b.replacement ?? ''),
+  );
+  return {
+    kind: 'scope',
+    file: file.path,
+    sourceHash: file.sourceHash,
+    keys: orderedSites.map(file.keyOf),
+  };
 }
 
 /**
@@ -265,138 +483,6 @@ function buildTestsSummary(tests: TestModel[]): TestsSummary {
   return { total, truncated, files: allFiles.slice(0, MAX_TEST_FILES) };
 }
 
-/** The exact source text a mutant replaces: not the enclosing line(s), the range itself. */
-export function extractOriginal(
-  source: string,
-  lineMap: number[],
-  location: schema.Location,
-): string {
-  const { start, end } = location;
-  return source.substring(
-    lineMap[start.line] + start.column - 1,
-    lineMap[end.line] + end.column - 1,
-  );
-}
-
-/**
- * The line(s) a mutant's range falls on, each stripped of its own leading
- * and trailing whitespace, joined with '\n' for a multi-line range. The
- * range text alone (`original`) is not enough to tell two mutants apart: on
- * a 14,140-mutant report, (file, original, mutatorName, replacement) held
- * 4,261 colliding pairs (30%); adding the whole line the range sits on cut
- * that to 1,163 (8%), because most repeats are the same short token (`+`,
- * `1`, an identifier) recurring across unrelated lines, while whole lines
- * repeat far less. `.trim()` also drops the line's own terminator
- * (`\r`, `\n`, `U+2028`, `U+2029`), since `lineMap` marks where a line
- * starts, not where it ends.
- */
-export function wholeLineOf(
-  source: string,
-  lineMap: number[],
-  location: schema.Location,
-): string {
-  const lines: string[] = [];
-  for (let line = location.start.line; line <= location.end.line; line++) {
-    const end = line + 1 < lineMap.length ? lineMap[line + 1] : source.length;
-    lines.push(source.slice(lineMap[line], end).trim());
-  }
-  return lines.join('\n');
-}
-
-/**
- * Builds a stable key with no line or column in it, so a key survives an
- * edit elsewhere in the file. Two ordinals disambiguate what the other
- * fields alone would merge, both counted over every mutant of the file
- * regardless of status, in source-position order (assigned by the caller),
- * so they come out the same on every run:
- *
- * - `lineOrdinal`: two mutants on the exact same line, same original text,
- *   mutator and replacement (e.g. `a + a` with both `+`s mutated the same
- *   way) get 0, 1, ... in column order. Always present, 0 when there is
- *   only one.
- * - `lineRepeatOrdinal`: once a copy of an identical line exists elsewhere
- *   in the file, `wholeLine` no longer picks out one physical line, so two
- *   mutants that also share original/mutatorName/replacement/lineOrdinal
- *   need a further tiebreaker: their order of appearance in the file.
- *   Included only when more than one mutant shares that tuple; this is the
- *   key's remaining weak point, since adding or removing a copy of the
- *   repeated line shifts this ordinal for every mutant after it.
- */
-function hashKey(
-  file: string,
-  wholeLine: string,
-  original: string,
-  mutatorName: string,
-  replacement: string | undefined,
-  lineOrdinal: number,
-  lineRepeatOrdinal: number | undefined,
-): string {
-  let input = `${file}\0${wholeLine}\0${original}\0${mutatorName}\0${replacement ?? ''}\0${lineOrdinal}`;
-  if (lineRepeatOrdinal !== undefined) {
-    input += `\0${lineRepeatOrdinal}`;
-  }
-  return createHash('sha1').update(input).digest('hex').slice(0, 12);
-}
-
-/**
- * Assigns every mutant of a file its key. `records` must already be sorted
- * by source position (line, then column), not the report's own array order:
- * that fixed order is what numbers a repeated tuple the same way on every
- * run, keeping the key independent of the report's array order.
- */
-export function assignKeys(
-  file: string,
-  records: Array<{
-    location: schema.Location;
-    wholeLine: string;
-    original: string;
-    mutatorName: string;
-    replacement: string | undefined;
-  }>,
-): string[] {
-  type Record = (typeof records)[number];
-  // Same physical line, same original/mutatorName/replacement: numbered by
-  // column order (the order `records` is already sorted in).
-  const lineGroupKeyOf = (r: Record) =>
-    `${r.location.start.line}\0${r.wholeLine}\0${r.original}\0${r.mutatorName}\0${r.replacement ?? ''}`;
-  const lineGroupSeen = new Map<string, number>();
-  const lineOrdinals = records.map((r) => {
-    const key = lineGroupKeyOf(r);
-    const ordinal = lineGroupSeen.get(key) ?? 0;
-    lineGroupSeen.set(key, ordinal + 1);
-    return ordinal;
-  });
-
-  // Same wholeLine/original/mutatorName/replacement/lineOrdinal, dropping
-  // `line` on purpose: this is what a repeated line collides on.
-  const repeatGroupKeyOf = (r: Record, lineOrdinal: number) =>
-    `${r.wholeLine}\0${r.original}\0${r.mutatorName}\0${r.replacement ?? ''}\0${lineOrdinal}`;
-  const repeatGroupCounts = new Map<string, number>();
-  records.forEach((r, i) => {
-    const key = repeatGroupKeyOf(r, lineOrdinals[i]);
-    repeatGroupCounts.set(key, (repeatGroupCounts.get(key) ?? 0) + 1);
-  });
-  const repeatGroupSeen = new Map<string, number>();
-
-  return records.map((r, i) => {
-    const key = repeatGroupKeyOf(r, lineOrdinals[i]);
-    let lineRepeatOrdinal: number | undefined;
-    if ((repeatGroupCounts.get(key) ?? 0) > 1) {
-      lineRepeatOrdinal = repeatGroupSeen.get(key) ?? 0;
-      repeatGroupSeen.set(key, lineRepeatOrdinal + 1);
-    }
-    return hashKey(
-      file,
-      r.wholeLine,
-      r.original,
-      r.mutatorName,
-      r.replacement,
-      lineOrdinals[i],
-      lineRepeatOrdinal,
-    );
-  });
-}
-
 /**
  * `getOriginalLines()`/`getMutatedLines()` return the enclosing whole
  * line(s), each still carrying its own line terminator, because they exist
@@ -462,10 +548,6 @@ export function rerunCommand(file: string): string {
   return `npx stryker run --incremental --mutate "${file}"`;
 }
 
-export function sourceHash(source: string): string {
-  return createHash('sha256').update(source).digest('hex').slice(0, 16);
-}
-
 /**
  * Removes the parts of a status reason that are specific to one sandbox run
  * and would otherwise make an unrelated rerun's output differ from this
@@ -496,12 +578,12 @@ export function sanitizeReason(
 
 /**
  * Builds every line of the final JSONL file, in the order they are
- * written: the run line, then each item kind's lines (sorted by position),
- * in `ITEM_KINDS` order, then one line per test without a kill, then the
- * summary line. Called with a freshly completed report and its metrics,
- * so every field (`tests`, `patch`) can be filled in; `AgentReporter`'s own
- * partial-file lines are built earlier, from `MutantResult` alone, and stay
- * in `agent-reporter.ts`.
+ * written: the run line, then one scope line per file, then each item
+ * kind's lines (sorted by position), in `ITEM_KINDS` order, then one line
+ * per test without a kill, then the summary line. Called with a freshly
+ * completed report and its metrics, so every field (`tests`, `patch`) can
+ * be filled in; `AgentReporter`'s own partial-file lines are built earlier,
+ * from `MutantResult` alone, and stay in `agent-reporter.ts`.
  */
 export function buildAgentReportLines(
   report: schema.MutationTestResult,
@@ -524,43 +606,34 @@ export function buildAgentReportLines(
   > = [];
   let unverifiedCount = 0;
 
-  for (const [file, fileResult] of Object.entries(report.files)) {
-    const lineMap = computeLineMap(fileResult.source);
-
-    // Sorted by position, over every mutant of the file regardless of
-    // status: `assignKeys` needs this order to number a repeated tuple the
-    // same way on every run.
-    const records = fileResult.mutants
-      .map((mutant) => ({
-        mutant,
+  const scopeLines: CompletedScopeLine[] = [];
+  for (const [filePath, fileResult] of Object.entries(report.files)) {
+    const file = sourceFile(filePath, fileResult.source);
+    const mutants = fileResult.mutants;
+    const plannedSites = mutants.map((mutant) => ({
+      mutant,
+      site: {
         location: mutant.location,
-        wholeLine: wholeLineOf(fileResult.source, lineMap, mutant.location),
-        original: extractOriginal(fileResult.source, lineMap, mutant.location),
         mutatorName: mutant.mutatorName,
         replacement: mutant.replacement,
-      }))
-      .sort(
-        (a, b) =>
-          a.mutant.location.start.line - b.mutant.location.start.line ||
-          a.mutant.location.start.column - b.mutant.location.start.column,
-      );
-    // The key reads `original` with each run of whitespace collapsed to one
-    // space, so re-indenting the lines of a multi-line range keeps its key.
-    // The `original` field in the output keeps the text as written.
-    const keys = assignKeys(
+      },
+    }));
+    const scopeLine = buildScopeLine(
       file,
-      records.map((record) => ({
-        ...record,
-        original: record.original.replace(/\s+/g, ' ').trim(),
-      })),
+      plannedSites.map(({ site }) => site),
     );
+    const pending = buildScopeLine(
+      file,
+      plannedSites
+        .filter(({ mutant }) => mutant.status === 'Pending')
+        .map(({ site }) => site),
+    ).keys;
+    scopeLines.push({ ...scopeLine, pending });
 
-    records.forEach((record, index) => {
-      const { mutant } = record;
-      const key = keys[index];
+    for (const { mutant, site } of plannedSites) {
       const keyedLocation: KeyedLocation = {
-        key,
-        file,
+        key: file.keyOf(site),
+        file: file.path,
         // Rebuilt, not copied: the report lists `end` before `start`, and
         // the partial file writes `start` first. One key order lets a
         // reader compare lines from both files as text.
@@ -570,19 +643,13 @@ export function buildAgentReportLines(
         },
         mutatorName: mutant.mutatorName,
         replacement: mutant.replacement,
-        original: record.original,
+        original: file.originalOf(mutant.location),
       };
 
       switch (mutant.status) {
         case 'Survived': {
           const model = mutantsById.get(mutant.id);
-          const entry = buildEntry(
-            file,
-            fileResult.source,
-            keyedLocation,
-            mutant,
-            model,
-          );
+          const entry = buildEntry(file, keyedLocation, mutant, model);
           // Survived, covered, and yet not one covering test actually ran
           // during this mutant's run: a measurement gap (stryker-js
           // issue #6210), not an untested line. Routed away from
@@ -600,9 +667,7 @@ export function buildAgentReportLines(
         }
         case 'Timeout': {
           const model = mutantsById.get(mutant.id);
-          timeouts.push(
-            buildEntry(file, fileResult.source, keyedLocation, mutant, model),
-          );
+          timeouts.push(buildEntry(file, keyedLocation, mutant, model));
           break;
         }
         case 'NoCoverage': {
@@ -634,12 +699,14 @@ export function buildAgentReportLines(
           break;
         }
         default:
-        // Killed and Pending mutants are only counted in `summary`; they
-        // give an agent nothing to act on.
+        // Killed and Pending mutants have no line of their own; `summary`
+        // counts them and the file's scope line lists their keys (and, for
+        // a Pending one, its key again in `pending`).
       }
-    });
+    }
   }
 
+  scopeLines.sort((a, b) => compareStrings(a.file, b.file));
   survivors.sort(compareByPosition);
   unverified.sort(compareByPosition);
   timeouts.sort(compareByPosition);
@@ -687,6 +754,7 @@ export function buildAgentReportLines(
 
   return [
     buildRunLine(runInfo),
+    ...scopeLines,
     ...ITEM_KINDS.flatMap((kind) => byKind[kind]),
     // `testWithoutKills.complete` (whether every test ran, i.e.
     // `disableBail`) has no per-line home in this shape: it is already the
@@ -697,8 +765,7 @@ export function buildAgentReportLines(
 }
 
 function buildEntry(
-  file: string,
-  fileSource: string,
+  file: SourceFile,
   keyedLocation: KeyedLocation,
   mutant: schema.MutantResult,
   model: MutantModel | undefined,
@@ -708,17 +775,17 @@ function buildEntry(
     ...keyedLocation,
     static: mutant.static,
     tests,
-    rerun: rerunCommand(file),
-    rerunExact: rerunExactCommand(file, mutant.location),
-    sourceHash: sourceHash(fileSource),
+    rerun: rerunCommand(file.path),
+    rerunExact: rerunExactCommand(file.path, mutant.location),
+    sourceHash: file.sourceHash,
     // A patch needs `model` for `getOriginalLines()`/`getMutatedLines()`,
     // and needs `mutant.replacement` to be set: when it is undefined,
     // `getMutatedLines()` falls back to `description` or `mutatorName`
     // instead, which is not a reproduction of the mutation at all.
     patch:
       model && mutant.replacement !== undefined
-        ? buildPatch(file, model)
-        : buildFallbackPatch(file),
+        ? buildPatch(file.path, model)
+        : buildFallbackPatch(file.path),
   };
 }
 
@@ -731,31 +798,4 @@ function buildEntry(
  */
 function buildFallbackPatch(file: string): string {
   return `--- a/${file}\n+++ b/${file}\n`;
-}
-
-/**
- * 1-based line number to the byte offset of that line's first character.
- * Index 0 is unused, matching `mutation-testing-metrics`' own line map, so
- * `lineMap[location.start.line]` needs no further shift.
- */
-export function computeLineMap(source: string): number[] {
-  const result = [0];
-  let lineStart = 0;
-  let pos = 0;
-  while (pos < source.length) {
-    const ch = source.charCodeAt(pos);
-    pos++;
-    if (ch === 13 /* \r */) {
-      if (source.charCodeAt(pos) === 10 /* \n */) {
-        pos++;
-      }
-      result.push(lineStart);
-      lineStart = pos;
-    } else if (ch === 10 /* \n */ || ch === 0x2028 || ch === 0x2029) {
-      result.push(lineStart);
-      lineStart = pos;
-    }
-  }
-  result.push(lineStart);
-  return result;
 }

@@ -16,14 +16,17 @@ import type { MutationTestingPlanReadyEvent } from '@stryker-mutator/api/report'
 import type { Logger } from '@stryker-mutator/api/logging';
 import { calculateMutationTestMetrics } from 'mutation-testing-metrics';
 
-import { AgentReporter, partialFileNameFor } from '../src/agent-reporter.ts';
+import {
+  AgentReporter,
+  partialFileIO,
+  partialFileNameFor,
+} from '../src/agent-reporter.ts';
 import type { AgentReporterOptions } from '../src/agent-reporter.ts';
 
 /**
- * `function add(a, b, c) {\n  return a + b + c;\n}\n`: two identical
- * `ArithmeticOperator` mutants (both `+` to `-`) exercise the key's
- * duplicate-tuple ordinal; one `Survived`-but-`testsCompleted: 0` mutant
- * exercises `unverified`.
+ * `function add(a, b, c) {\n  return a + b + c;\n}\n`: two distinct
+ * `ArithmeticOperator` sites (both `+` to `-`) exercise site-based keys.
+ * One `Survived` mutant with no completed test exercises `unverified`.
  */
 const fileSource = 'function add(a, b, c) {\n  return a + b + c;\n}\n';
 
@@ -392,6 +395,7 @@ describe('AgentReporter', () => {
       assert.equal(lines[lines.length - 1].kind, 'summary');
       const expectedKindOrder = [
         'run',
+        'scope',
         'survivor',
         'unverified',
         'timeout',
@@ -412,16 +416,35 @@ describe('AgentReporter', () => {
       );
     });
 
-    it('puts schemaVersion, tool, strykerVersion, disableBail and concurrency on the run line', async () => {
+    it('puts schemaVersion, tool, strykerVersion and run options on the run line', async () => {
       const lines = await actAndWrite(
         buildReport(),
         fileNameIn('agent.jsonl'),
       );
       const run = lines[0];
       assert.equal(run.tool, 'stryker');
-      assert.equal(typeof run.schemaVersion, 'string');
+      assert.equal(run.schemaVersion, '3');
       assert.equal(typeof run.strykerVersion, 'string');
       assert.equal(typeof run.disableBail, 'boolean');
+    });
+
+    it('writes generated and pending keys on a scope line after the run line', async () => {
+      const lines = await actAndWrite(
+        buildReport(),
+        fileNameIn('agent.jsonl'),
+      );
+      const scope = lines[1];
+
+      assert.equal(scope.kind, 'scope');
+      assert.equal(scope.file, 'src/file.js');
+      assert.match(scope.sourceHash, /^[0-9a-f]{16}$/);
+      assert.equal(scope.keys.length, 9);
+      // The Pending mutant `m9` (line 1, columns 7 to 8, `Identifier`, `t`).
+      // The key is the sha1 prefix of the documented hash input, worked out
+      // by hand: file, trimmed line, start offset 6, end offset 7, mutator,
+      // replacement, and 0 earlier copies of the line.
+      assert.deepEqual(scope.pending, ['cc0a00c4a2c3']);
+      assert.ok(scope.keys.includes('cc0a00c4a2c3'));
     });
 
     it('includes a configured concurrency on the run line', async () => {
@@ -441,6 +464,27 @@ describe('AgentReporter', () => {
       await sut.wrapUp();
       const lines = readWritten(fileName);
       assert.equal(lines[0].concurrency, 4);
+    });
+
+    it('echoes configured mutate patterns and incremental mode on the run line', async () => {
+      const fileName = fileNameIn('agent.jsonl');
+      const sut = new AgentReporter(
+        buildOptions(
+          {
+            mutate: ['src/file.js:2:11-2:12'],
+            incremental: true,
+          } as Partial<StrykerOptions>,
+          { fileName, partial: false },
+        ),
+        buildLogger(),
+      );
+      const report = buildReport();
+      sut.onMutationTestReportReady(report, calculateMutationTestMetrics(report));
+      await sut.wrapUp();
+
+      const run = readWritten(fileName)[0];
+      assert.deepEqual(run.mutate, ['src/file.js:2:11-2:12']);
+      assert.equal(run.incremental, true);
     });
 
     it('reports a summary that matches the metrics', async () => {
@@ -520,7 +564,7 @@ describe('AgentReporter', () => {
       );
     });
 
-    it('gives the two occurrences of the same (file, original, mutatorName, replacement) tuple different keys', async () => {
+    it('gives each same-line mutation site a key from its own column', async () => {
       const lines = await actAndWrite(
         buildReport(),
         fileNameIn('agent.jsonl'),
@@ -540,9 +584,7 @@ describe('AgentReporter', () => {
         (s) => s.original === '+' && s.location.start.column === 12,
       ).key;
 
-      // A comment, not a copy of an existing line: a copy would collide on
-      // `wholeLine` and shift the repeat ordinal, which is the key's known
-      // weak point, not what this test checks.
+      // The comment adds no matching source window, so both site keys stay stable.
       const shiftedSource = `// a leading comment\n${fileSource}`;
       const after = buildReport();
       (after.files['src/file.js'] as any).source = shiftedSource;
@@ -573,8 +615,7 @@ describe('AgentReporter', () => {
         (s) => s.original === '+' && s.location.start.column === 12,
       ).key;
 
-      // Four extra leading spaces on the mutated line: `wholeLine` trims
-      // each line, so the key must not move.
+      // Four extra leading spaces on the mutated line leave its trimmed window unchanged.
       const reindentedSource =
         'function add(a, b, c) {\n      return a + b + c;\n}\n';
       const after = buildReport();
@@ -591,10 +632,8 @@ describe('AgentReporter', () => {
       assert.equal(afterKey, beforeKey);
     });
 
-    it('keeps a key stable when indentation changes around a mutant that spans multiple lines', async () => {
-      // A mutant whose range itself covers two lines (e.g. a multi-line
-      // condition): `wholeLine` joins both trimmed lines, so re-indenting
-      // either one must not move the key.
+    it('keeps a key stable when indentation changes at a site in a multi-line source', async () => {
+      // The site window stays the same after indentation changes.
       const source = 'function f(a, b) {\n  return (\n    a && b\n  );\n}\n';
       const report = buildReport();
       report.files['src/file.js'] = {
@@ -648,9 +687,7 @@ describe('AgentReporter', () => {
     });
 
     it('gives two mutants on identical, repeated lines different keys', async () => {
-      // Same line text (`return a + b;`) twice in the file, each with the
-      // same `+` to `-` mutation: `wholeLine` alone cannot tell them apart,
-      // so the key needs the repeat ordinal (field 7).
+      // The matching source window above the second site changes its ordinal.
       const source =
         'function add(a, b) {\n  return a + b;\n}\nfunction sum(a, b) {\n  return a + b;\n}\n';
       const report = buildReport();
@@ -904,6 +941,54 @@ describe('AgentReporter', () => {
       assert.equal(lines[0].kind, 'run');
     });
 
+    it('writes a planned scope line with stable keys', async () => {
+      const source = [
+        'const aToB = edgesByPair.get(`${a}->${b}`) ?? [];',
+        'const other = 1;',
+        'if (x) {',
+        '  const aToB = edgesByPair.get(`${a}->${b}`) ?? [];',
+        '}',
+        '',
+      ].join('\n');
+      const fileName = fileNameIn('agent.jsonl');
+      const partialFileName = partialFileNameFor(fileName);
+      const readSource = partialFileIO.readSource;
+      partialFileIO.readSource = async () => source;
+      try {
+        const sut = new AgentReporter(
+          buildOptions({}, { fileName, partial: true }),
+          buildLogger(),
+        );
+        const first = survivedResult('src/rules/cycles.ts', {
+          id: 'cycle-1',
+          location: {
+            start: { line: 0, column: 13 },
+            end: { line: 0, column: 48 },
+          },
+          mutatorName: 'LogicalOperator',
+          replacement: 'edgesByPair.get(`${a}->${b}`) && []',
+        });
+        const second = survivedResult('src/rules/cycles.ts', {
+          id: 'cycle-2',
+          location: {
+            start: { line: 3, column: 15 },
+            end: { line: 3, column: 50 },
+          },
+          mutatorName: 'LogicalOperator',
+          replacement: 'edgesByPair.get(`${a}->${b}`) && []',
+        });
+        sut.onMutationTestingPlanReady(readyEvent([first, second]));
+        await sut.wrapUp();
+
+        assert.equal(
+          JSON.stringify(readWritten(partialFileName)[1]),
+          '{"kind":"scope","file":"src/rules/cycles.ts","sourceHash":"7c1cae4b334c6a13","keys":["8764c5229f05","2e79224b8652"]}',
+        );
+      } finally {
+        partialFileIO.readSource = readSource;
+      }
+    });
+
     it('appends one line per tested mutant, after the plan, in the order they complete', async () => {
       const fileName = fileNameIn('agent.jsonl');
       const partialFileName = partialFileNameFor(fileName);
@@ -925,7 +1010,7 @@ describe('AgentReporter', () => {
       sut.onMutantTested(second);
       await sut.wrapUp();
 
-      const lines = readWritten(partialFileName).slice(1);
+      const lines = readWritten(partialFileName).slice(2);
       assert.equal(lines.length, 2);
       assert.equal(lines[0].kind, 'survivor');
       assert.equal(lines[1].kind, 'timeout');
@@ -943,7 +1028,7 @@ describe('AgentReporter', () => {
       sut.onMutationTestingPlanReady(readyEvent([survived]));
       sut.onMutantTested(survived);
       await sut.wrapUp();
-      const partialLine = readWritten(partialFileName)[1];
+      const partialLine = readWritten(partialFileName)[2];
 
       // The final report keys a file relative to `process.cwd()`, the same
       // way the reporter's own `normalizeReportFileName` does; the plan's
@@ -992,11 +1077,11 @@ describe('AgentReporter', () => {
       sut.onMutationTestingPlanReady(readyEvent([unverified]));
       sut.onMutantTested(unverified);
       await sut.wrapUp();
-      const line = readWritten(partialFileName)[1];
+      const line = readWritten(partialFileName)[2];
       assert.equal(line.kind, 'unverified');
     });
 
-    it('does not append a line for a Killed or Pending mutant', async () => {
+    it('writes no item line for a Killed or Pending mutant', async () => {
       const fileName = fileNameIn('agent.jsonl');
       const partialFileName = partialFileNameFor(fileName);
       const sut = new AgentReporter(
@@ -1011,7 +1096,7 @@ describe('AgentReporter', () => {
       sut.onMutantTested(killed);
       await sut.wrapUp();
       const lines = readWritten(partialFileName);
-      assert.equal(lines.length, 1);
+      assert.equal(lines.length, 2);
     });
 
     it('does not write or append to the partial file when partial is false', async () => {

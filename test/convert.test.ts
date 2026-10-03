@@ -75,6 +75,122 @@ function buildReport(
 }
 
 describe('convert', () => {
+  it('writes source keys, pending state, and known mutate options', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'convert-scope-'));
+    const repeatedLine = 'const aToB = edgesByPair.get(`${a}->${b}`) ?? [];';
+    const source = [
+      repeatedLine,
+      'const other = 1;',
+      'if (x) {',
+      `  ${repeatedLine}`,
+      '}',
+      '',
+    ].join('\n');
+    const report = buildReport(dir, source, {
+      config: {
+        tempDirName: '.stryker-tmp',
+        disableBail: false,
+        concurrency: 4,
+        mutate: ['src/rules/cycles.ts:1:13-1:48'],
+        incremental: true,
+      },
+      files: {
+        'src/rules/cycles.ts': {
+          language: 'ts',
+          source,
+          mutants: [
+            {
+              id: 'cycle-1',
+              mutatorName: 'LogicalOperator',
+              replacement: 'edgesByPair.get(`${a}->${b}`) && []',
+              status: 'Survived',
+              static: false,
+              coveredBy: ['t1'],
+              testsCompleted: 1,
+              location: {
+                start: { line: 1, column: 14 },
+                end: { line: 1, column: 49 },
+              },
+            },
+            {
+              id: 'cycle-2',
+              mutatorName: 'LogicalOperator',
+              replacement: 'edgesByPair.get(`${a}->${b}`) && []',
+              status: 'Killed',
+              killedBy: ['t1'],
+              location: {
+                start: { line: 4, column: 16 },
+                end: { line: 4, column: 51 },
+              },
+            },
+          ],
+        },
+      },
+    });
+    const reportPath = path.join(dir, 'mutation.json');
+    writeFileSync(reportPath, JSON.stringify(report));
+
+    const lines = (await convertReport(reportPath))
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line));
+    const runLine = lines[0];
+    const survivor = lines.find((line) => line.kind === 'survivor');
+
+    assert.equal(
+      JSON.stringify(lines[1]),
+      '{"kind":"scope","file":"src/rules/cycles.ts","sourceHash":"7c1cae4b334c6a13","keys":["8764c5229f05","2e79224b8652"],"pending":[]}',
+    );
+    assert.deepEqual(runLine.mutate, ['src/rules/cycles.ts:1:13-1:48']);
+    assert.equal(runLine.incremental, true);
+    assert.equal(survivor.key, '8764c5229f05');
+    assert.equal(survivor.sourceHash, '7c1cae4b334c6a13');
+  });
+
+  it('keeps only the selected site key in a narrowed report', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'convert-narrowed-'));
+    const repeatedLine = 'const aToB = edgesByPair.get(`${a}->${b}`) ?? [];';
+    const source = [
+      repeatedLine,
+      'const other = 1;',
+      'if (x) {',
+      `  ${repeatedLine}`,
+      '}',
+      '',
+    ].join('\n');
+    const report = buildReport(dir, source, {
+      files: {
+        'src/rules/cycles.ts': {
+          language: 'ts',
+          source,
+          mutants: [
+            {
+              id: 'cycle-2',
+              mutatorName: 'LogicalOperator',
+              replacement: 'edgesByPair.get(`${a}->${b}`) && []',
+              status: 'Killed',
+              killedBy: ['t1'],
+              location: {
+                start: { line: 4, column: 16 },
+                end: { line: 4, column: 51 },
+              },
+            },
+          ],
+        },
+      },
+    });
+    const reportPath = path.join(dir, 'mutation.json');
+    writeFileSync(reportPath, JSON.stringify(report));
+
+    const lines = (await convertReport(reportPath))
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line));
+
+    assert.deepEqual(lines[1].keys, ['2e79224b8652']);
+    assert.ok(!lines.some((line) => line.key === '8764c5229f05'));
+  });
+
   it('produces byte-identical output to the reporter for the same report and metrics', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'convert-'));
     const source = 'function add(a, b) {\n  return a - b;\n}\n';

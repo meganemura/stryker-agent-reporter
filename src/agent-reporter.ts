@@ -6,9 +6,10 @@
  * appends each actionable mutant result to a second, partial file as soon
  * as the mutant's status is known, so an agent can start fixing survivors
  * before the run finishes.
- * Boundary: this reporter only reads `mutantPlans`/`result`/`report`/
- * `metrics` and writes two files. It does not change what Stryker mutates
- * or how it runs. It has no dependency on `@stryker-mutator/core` internals:
+ * Boundary: this reporter reads mutant plans, results, reports, metrics,
+ * and original source files. It writes two report files. It does not change
+ * what Stryker mutates or how it runs. It has no dependency on internals of
+ * `@stryker-mutator/core`:
  * `writeFile` and `normalizeReportFileName` below are based on the
  * corresponding functions in Stryker (Apache-2.0). The final file's own
  * lines come from `build-lines.ts`, shared with the `convert` command so a
@@ -31,18 +32,15 @@ import type { MutationTestingPlanReadyEvent } from '@stryker-mutator/api/report'
 import type { MutationTestMetricsResult } from 'mutation-testing-metrics';
 
 import {
-  assignKeys,
   buildAgentReportLines,
+  buildScopeLine,
   buildRunLine,
-  computeLineMap,
-  extractOriginal,
   rerunCommand,
   rerunExactCommand,
   sanitizeReason,
-  sourceHash,
-  wholeLineOf,
+  sourceFile,
 } from './build-lines.ts';
-import type { ItemKind } from './build-lines.ts';
+import type { ItemKind, ScopeLine } from './build-lines.ts';
 
 /**
  * The options this reporter reads off `StrykerOptions.agentReporter`.
@@ -212,6 +210,7 @@ export class AgentReporter implements Reporter {
       string,
       typeof mutantPlans extends readonly (infer T)[] ? T[] : never
     >();
+    const scopeLines: ScopeLine[] = [];
     for (const plan of mutantPlans) {
       const group = byFile.get(plan.mutant.fileName);
       if (group) {
@@ -237,16 +236,21 @@ export class AgentReporter implements Reporter {
         );
         continue;
       }
-      this.indexPlannedMutants(fileName, source, plans);
+      scopeLines.push(this.indexPlannedMutants(fileName, source, plans));
     }
 
+    scopeLines.sort((a, b) =>
+      a.file < b.file ? -1 : a.file > b.file ? 1 : 0,
+    );
     {
       this.partialFileName = path.resolve(
         partialFileNameFor(path.normalize(this.options.agentReporter.fileName)),
       );
       await writeFile(
         this.partialFileName,
-        `${JSON.stringify(buildRunLine(this.options))}\n`,
+        [buildRunLine(this.options), ...scopeLines]
+          .map((line) => `${JSON.stringify(line)}\n`)
+          .join(''),
       );
     }
   }
@@ -255,50 +259,33 @@ export class AgentReporter implements Reporter {
     fileName: string,
     source: string,
     plans: readonly MutationTestingPlanReadyEvent['mutantPlans'][number][],
-  ): void {
-    const reportFile = normalizeReportFileName(fileName);
-    const lineMap = computeLineMap(source);
-    const hash = sourceHash(source);
+  ): ScopeLine {
+    const file = sourceFile(normalizeReportFileName(fileName), source);
+    const plannedSites = plans.map(({ mutant }) => ({
+      mutant,
+      site: {
+        location: toOneBasedLocation(mutant.location),
+        mutatorName: mutant.mutatorName,
+        replacement: mutant.replacement,
+      },
+    }));
 
-    // Sorted by position, over every mutant of the file: `assignKeys`
-    // needs this order to number a repeated tuple the same way on every
-    // run, matching the order `buildAgentReportLines` uses later.
-    const records = plans
-      .map(({ mutant }) => {
-        const location = toOneBasedLocation(mutant.location);
-        return {
-          id: mutant.id,
-          location,
-          wholeLine: wholeLineOf(source, lineMap, location),
-          original: extractOriginal(source, lineMap, location),
-          mutatorName: mutant.mutatorName,
-          replacement: mutant.replacement,
-        };
-      })
-      .sort(
-        (a, b) =>
-          a.location.start.line - b.location.start.line ||
-          a.location.start.column - b.location.start.column,
-      );
-    const keys = assignKeys(
-      reportFile,
-      records.map((record) => ({
-        ...record,
-        original: record.original.replace(/\s+/g, ' ').trim(),
-      })),
-    );
-
-    records.forEach((record, index) => {
-      this.plannedMutants.set(record.id, {
-        key: keys[index],
-        file: reportFile,
-        location: record.location,
-        mutatorName: record.mutatorName,
-        replacement: record.replacement,
-        original: record.original,
-        sourceHash: hash,
+    for (const { mutant, site } of plannedSites) {
+      this.plannedMutants.set(mutant.id, {
+        key: file.keyOf(site),
+        file: file.path,
+        location: site.location,
+        mutatorName: site.mutatorName,
+        replacement: site.replacement,
+        original: file.originalOf(site.location),
+        sourceHash: file.sourceHash,
       });
-    });
+    }
+
+    return buildScopeLine(
+      file,
+      plannedSites.map(({ site }) => site),
+    );
   }
 
   /**
@@ -439,10 +426,10 @@ function classifyForPartial(
 /**
  * `Mutant.location` is 0-based (Stryker's own internal convention); the
  * report's `schema.Location` is 1-based. Converting here, at plan time,
- * keeps every downstream computation (`extractOriginal`, `wholeLineOf`,
- * `assignKeys`, the rerun commands) working on the same 1-based positions
- * the final report uses, so a key computed in the plan matches the key
- * computed later from the report.
+ * keeps every downstream computation (`originalOf`, `keyOf`, the rerun
+ * commands) working on the same 1-based positions the final report uses,
+ * so a key computed in the plan matches the key computed later from the
+ * report.
  */
 function toOneBasedLocation(location: schema.Location): schema.Location {
   return {
@@ -450,4 +437,3 @@ function toOneBasedLocation(location: schema.Location): schema.Location {
     end: { line: location.end.line + 1, column: location.end.column + 1 },
   };
 }
-

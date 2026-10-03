@@ -55,23 +55,47 @@ function resolveCalculateMutationTestMetrics(): typeof CalculateMutationTestMetr
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 /**
  * A report's `config` is a free-format object (Stryker writes its own
- * resolved `StrykerOptions` there, but the schema does not say so); this
- * reads the three fields the run line and `sanitizeReason` need, each with
- * the same default Stryker itself uses when the field is absent.
+ * resolved `StrykerOptions` there, but the schema does not say so). This
+ * reads the fields the run line and `sanitizeReason` need, each only when
+ * it has the expected type. `disableBail` and `tempDirName` take the same
+ * default Stryker itself uses. `mutate` and `incremental` stay absent when
+ * the report lacks them: a guessed value would read as a fact about the run.
  */
 function runInfoFromReport(report: schema.MutationTestResult): RunInfo {
-  const config = (report.config ?? {}) as {
-    disableBail?: boolean;
-    concurrency?: number | string;
-    tempDirName?: string;
-  };
+  const configValue: unknown = report.config;
+  const config = isRecord(configValue) ? configValue : {};
+  const mutate = stringArray(config.mutate);
   return {
-    disableBail: config.disableBail ?? false,
-    concurrency: config.concurrency,
-    tempDirName: config.tempDirName ?? DEFAULT_TEMP_DIR_NAME,
+    disableBail: typeof config.disableBail === 'boolean' ? config.disableBail : false,
+    concurrency:
+      typeof config.concurrency === 'number' ||
+      typeof config.concurrency === 'string'
+        ? config.concurrency
+        : undefined,
+    mutate,
+    incremental:
+      typeof config.incremental === 'boolean' ? config.incremental : undefined,
+    tempDirName:
+      typeof config.tempDirName === 'string'
+        ? config.tempDirName
+        : DEFAULT_TEMP_DIR_NAME,
   };
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const strings = value.filter(
+    (item: unknown): item is string => typeof item === 'string',
+  );
+  return strings.length === value.length ? strings : undefined;
 }
 
 /**
