@@ -21,7 +21,7 @@ Stryker's default `plugins` value loads only `@stryker-mutator/*` packages. Add 
 
 ## Output
 
-The reporter writes to `reports/mutation/agent.jsonl` by default. Each line has a `kind` field. A `run` line comes first, then one line per actionable mutant, then one line per test that killed no mutant, then a `summary` line last. See [docs/output.md](docs/output.md) for every field.
+The reporter writes to `reports/mutation/agent.jsonl` by default. Each line has a `kind` field. A `run` line comes first, then one `scope` line per mutated file, then one line per actionable mutant, then one line per test that killed no mutant, then a `summary` line last. A `scope` line lists the key of every mutant Stryker generated for its file. With it, a reader can tell a mutant that Stryker killed from a mutant that a narrower `mutate` range left out. See [docs/output.md](docs/output.md) for every field.
 
 ## Read it while the run goes
 
@@ -47,7 +47,7 @@ npx stryker-agent-reporter gate --since origin/main --format github
 | --- | --- |
 | `0` | Nothing to act on. |
 | `1` | A survivor or an uncovered mutant remains. |
-| `2` | A usage error: an unreadable file, an unknown flag, or, with `--since`, a missing `git` or an unknown ref. |
+| `2` | A usage error: an unreadable file, an unknown flag, a file that is not `schemaVersion` `"3"`, or, with `--since`, a missing `git` or an unknown ref. |
 | `3` | An unverified mutant, or a file `--since` could not scope: a measurement failure, not a proven gap. |
 
 See [docs/output.md](docs/output.md) for `gate`'s and `convert`'s full input and output.

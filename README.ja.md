@@ -27,6 +27,9 @@ Stryker の `plugins` の既定値は `@stryker-mutator/*` だけを読み込む
 reporter は既定で `reports/mutation/agent.jsonl` に書く。
 各行は `kind` フィールドを持つ。
 最初に `run` の行が 1 つ来る。
+次に、mutate された各ファイルの `scope` の行が 1 行ずつ続く。
+`scope` の行は、そのファイルについて Stryker が生成した mutant の key をすべて並べる。
+これがあると、Stryker が殺した mutant と、より狭い `mutate` の範囲が除いた mutant を見分けられる。
 次にエージェントが手を打てる mutant の行が、1 件につき 1 行続く。
 次に、どの mutant も殺せなかったテストの行が 1 行ずつ続く。
 最後に `summary` の行が 1 つ来る。
@@ -59,7 +62,7 @@ npx stryker-agent-reporter gate --since origin/main --format github
 | --- | --- |
 | `0` | 手を打つべきものが無い。 |
 | `1` | 生き残った mutant か、カバーされていない mutant が残っている。 |
-| `2` | 使い方の誤り: 読めないファイル、未知のフラグ、`--since` での git の不在や不明な ref。 |
+| `2` | 使い方の誤り: 読めないファイル、未知のフラグ、`schemaVersion` が `"3"` でないファイル、`--since` での git の不在や不明な ref。 |
 | `3` | 未検証の mutant、または `--since` が絞れなかったファイルがある。計測の失敗であり、証明された穴ではない。 |
 
 `gate` と `convert` の入出力の全体は [docs/output.md](docs/output.md) を参照。
