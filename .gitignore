@@ -2,3 +2,7 @@ node_modules/
 dist/
 reports/
 .stryker-tmp/
+.nukadoko/
+.env
+.env.*
+!.env.example

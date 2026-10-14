@@ -16,6 +16,8 @@ export default {
   // - common noise directories that init found on disk (test).
   //   test/** also covers test/e2e/fixture. This repository has no
   //   top-level fixtures/ directory.
+  // - the nukadoko scenarios (features/, nukadoko.config.ts), which are
+  //   tests of the built CLI, like test/.
   //   Remove one of these entries if that directory holds module content.
   exclude: [
     "archstrict.config.ts",
@@ -23,6 +25,8 @@ export default {
     ".*/**",
     "**/.*/**",
     "test/**",
+    "features/**",
+    "nukadoko.config.ts",
   ],
   // init declared one module per directory that holds TypeScript source and
   // one per TypeScript source file, so every file that check analyzes
