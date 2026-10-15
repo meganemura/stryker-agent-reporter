@@ -4,6 +4,7 @@ Before 1.0, a minor version may change the API.
 
 ## Unreleased
 
+- A release no longer starts from a pushed tag. A version bump in `package.json` that lands on `main` starts the publish workflow, and after `npm publish` succeeds, the workflow creates the `v<version>` tag and the GitHub release. See `docs/releasing.md`.
 - A `testWithoutKills` line carries `coveredMutants`, the number of this run's mutants the test reached. Under a narrowed `--mutate`, it separates a test that reached no mutant of the run from a test that reached some and killed none. The field is absent when the run measured no per-test coverage.
 
 ## 0.2.0 (2026-10-04)
