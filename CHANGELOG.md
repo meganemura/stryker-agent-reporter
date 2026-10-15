@@ -4,6 +4,8 @@ Before 1.0, a minor version may change the API.
 
 ## Unreleased
 
+- A `testWithoutKills` line carries `coveredMutants`, the number of this run's mutants the test reached. Under a narrowed `--mutate`, it separates a test that reached no mutant of the run from a test that reached some and killed none. The field is absent when the run measured no per-test coverage.
+
 ## 0.2.0 (2026-10-04)
 
 Breaking: every `key` changes, and `schemaVersion` is now `"3"`. A key from 0.1.0 matches no key from 0.2.0. To get a version 3 file from a saved report, run `convert` on its `mutation.json`.

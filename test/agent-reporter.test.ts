@@ -777,8 +777,33 @@ describe('AgentReporter', () => {
           name: 'never used',
           file: 'test/file.spec.js',
           line: 10,
+          coveredMutants: 0,
         },
       ]);
+    });
+
+    it('counts the mutants a test without kills reached, so a test that reached some stands out', async () => {
+      const report = buildReport();
+      const t2 = (report.testFiles!['test/file.spec.js'] as { tests: Array<{ id: string }> }).tests[1]!;
+      const survivor = report.files['src/file.js']!.mutants.find((m) => m.status === 'Survived')!;
+      survivor.coveredBy = [...(survivor.coveredBy ?? []), t2.id];
+      const lines = await actAndWrite(report, fileNameIn('agent.jsonl'));
+      assert.deepEqual(
+        linesOfKind(lines, 'testWithoutKills').map((line) => [line.name, line.coveredMutants]),
+        [['never used', 1]],
+      );
+    });
+
+    it('leaves coveredMutants out when the run measured no per-test coverage', async () => {
+      const report = buildReport();
+      for (const mutant of report.files['src/file.js']!.mutants) {
+        delete mutant.coveredBy;
+        delete mutant.killedBy;
+      }
+      const lines = await actAndWrite(report, fileNameIn('agent.jsonl'));
+      const withoutKills = linesOfKind(lines, 'testWithoutKills');
+      assert.ok(withoutKills.length > 0);
+      for (const line of withoutKills) assert.equal('coveredMutants' in line, false);
     });
 
     it('follows disableBail on the run line', async () => {

@@ -93,6 +93,15 @@ export interface TestRef {
   line?: number;
 }
 
+/**
+ * A `testWithoutKills` line. `coveredMutants` is present only when the run
+ * measured per-test coverage; without it, a test that reached no mutant and
+ * a test that reached some and killed none look the same.
+ */
+export interface TestWithoutKills extends TestRef {
+  coveredMutants?: number;
+}
+
 export interface TestFileSummary {
   file: string;
   count: number;
@@ -714,11 +723,22 @@ export function buildAgentReportLines(
   ignored.sort(compareByPosition);
   invalid.sort(compareByPosition);
 
-  const testsWithoutKills: TestRef[] = [];
+  // A run narrowed with `--mutate` still lists every test in the project, so
+  // most of these lines are tests that never reached a mutant of this run.
+  // Counting the mutants each one reached tells those apart from a test that
+  // ran against mutants and killed none, which is the one worth reading.
+  // Stryker records `coveredBy` only with per-test coverage, so with
+  // `coverageAnalysis: "off"` there is no count to give.
+  const coverageKnown = Object.values(report.files).some((file) =>
+    file.mutants.some((mutant) => mutant.coveredBy !== undefined),
+  );
+  const testsWithoutKills: TestWithoutKills[] = [];
   for (const testFile of collectTestFiles(metrics.testMetrics)) {
     for (const test of testFile.tests) {
       if (!test.killedMutants?.length) {
-        testsWithoutKills.push(toTestRef(test));
+        const ref: TestWithoutKills = toTestRef(test);
+        if (coverageKnown) ref.coveredMutants = test.coveredMutants?.length ?? 0;
+        testsWithoutKills.push(ref);
       }
     }
   }
