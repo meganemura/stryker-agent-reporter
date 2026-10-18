@@ -13,6 +13,8 @@ const survivor = z.object({
   rerun: z.string().nullable().describe("the line's rerun command, or null when it has none"),
 });
 
+// The agent reads the file, not stdout, so the step reads back what convert
+// wrote to --output and keeps only the fields the agent acts on.
 export default defineStep({
   description: "Runs `stryker-agent-reporter convert <report> --output reports/mutation/agent.jsonl` and reads the survivor lines it wrote.",
   pattern: "the agent converts the saved report to JSON Lines",
@@ -24,10 +26,8 @@ export default defineStep({
   }),
   from: { root: [createChangedRepository, "root"], report: [saveStrykerReport, "report"] },
   mutates: true,
-  rationale:
-    "The agent reads the file, not stdout, so the step reads back what convert wrote to --output and keeps only the fields the agent acts on.",
-  run({}, { root, report }) {
-    const { exitCode, stderr } = runCli(["convert", report, "--output", OUTPUT], root);
+  async run({}, { root, report }) {
+    const { exitCode, stderr } = await runCli(["convert", report, "--output", OUTPUT], root);
     if (exitCode !== 0) return { exitCode, output: OUTPUT, survivors: [] };
     if (stderr !== "") throw new Error(`convert wrote to stderr: ${stderr}`);
     const survivors = readFileSync(join(root, OUTPUT), "utf8")

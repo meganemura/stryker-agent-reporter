@@ -5,6 +5,10 @@ import createChangedRepository from "./create-changed-repository.ts";
 
 const REPORT = "reports/mutation/mutation.json";
 
+// A real Stryker run takes a minute and decides by itself which mutants
+// survive. The report here is the schema Stryker writes (mutation-testing-
+// report-schema 1.x), with the file's real source, so convert computes real
+// keys, patches, and source hashes from it.
 export default defineStep({
   description:
     "Writes a saved Stryker mutation.json into the repository with two surviving mutants: one on the changed line, one on an unchanged line.",
@@ -25,8 +29,6 @@ export default defineStep({
     unchangedLine: [createChangedRepository, "unchangedLine"],
   },
   mutates: true,
-  rationale:
-    "A real Stryker run takes a minute and decides by itself which mutants survive. The report here is the schema Stryker writes (mutation-testing-report-schema 1.x), with the file's real source, so convert computes real keys, patches, and source hashes from it.",
   run({}, { root, file, source, changedLine, unchangedLine }) {
     const lines = source.split("\n");
     const mutantOn = (id: string, line: number, original: string, replacement: string) => {

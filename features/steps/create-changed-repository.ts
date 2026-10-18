@@ -11,6 +11,10 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
+// gate --since asks git which lines changed, so the scenario needs a real
+// repository rather than a list of line numbers. The repository is a scratch
+// directory the scratch fixture removes after the scenario, so nothing outside
+// it changes.
 export default defineStep({
   description: "Creates a scratch git repository with two commits; the second one changes one line of src/price.js.",
   pattern: "a git repository whose last commit changed one line of a source file",
@@ -24,8 +28,6 @@ export default defineStep({
     unchangedLine: z.number().describe("a 1-based line both commits share"),
   }),
   mutates: true,
-  rationale:
-    "gate --since asks git which lines changed, so the scenario needs a real repository rather than a list of line numbers. The repository is a scratch directory the scratch fixture removes after the scenario, so nothing outside it changes.",
   run({ scratch }) {
     const root = scratch.dir("stryker-agent-reporter-gate");
     mkdirSync(join(root, "src"));

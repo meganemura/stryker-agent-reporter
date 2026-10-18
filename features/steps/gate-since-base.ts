@@ -3,6 +3,9 @@ import { runCli } from "./cli.ts";
 import convertReport from "./convert-report.ts";
 import createChangedRepository from "./create-changed-repository.ts";
 
+// The exit code is the check's verdict in CI, so it is returned as data. The
+// default jsonl format is the one an agent parses; github and text render the
+// same items.
 export default defineStep({
   description: "Runs `stryker-agent-reporter gate <agent.jsonl> --since <base>` and reads the survivors it kept.",
   pattern: "the agent gates the converted output since the commit before the change",
@@ -18,10 +21,8 @@ export default defineStep({
     base: [createChangedRepository, "base"],
   },
   mutates: false,
-  rationale:
-    "The exit code is the check's verdict in CI, so it is returned as data. The default jsonl format is the one an agent parses; github and text render the same items.",
-  run({}, { root, output, base }) {
-    const { exitCode, stdout } = runCli(["gate", output, "--since", base], root);
+  async run({}, { root, output, base }) {
+    const { exitCode, stdout } = await runCli(["gate", output, "--since", base], root);
     const lines = stdout
       .split("\n")
       .filter((line) => line !== "")
