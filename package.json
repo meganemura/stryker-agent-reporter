@@ -44,7 +44,7 @@
     "@types/node": "26.4.0",
     "archstrict": "0.1.0",
     "mutation-testing-metrics": "3.8.4",
-    "nukadoko": "0.17.0",
+    "nukadoko": "0.18.0",
     "typescript": "7.0.2"
   },
   "scripts": {
