@@ -12,5 +12,5 @@
     "types": ["node"],
     "skipLibCheck": true
   },
-  "include": ["src", "test", "features", "nukadoko.config.ts"]
+  "include": ["src", "test", "features", "nukadoko.config.ts", "nukadoko.program.ts"]
 }
