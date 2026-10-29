@@ -9,6 +9,6 @@ Feature: Gate a pull request on the mutants it left alive
     Given a git repository whose last commit changed one line of a source file
     And a saved Stryker report with one survivor on that changed line and one on an unchanged line
     When the agent converts the saved report to JSON Lines
-    Then each survivor's line carries a patch and a rerun command
+    Then each survivor's line carries a patch that starts with "--- a/" and a rerun command that contains "stryker run"
     When the agent gates the converted output since the commit before the change
     Then the gate exits 1 and names only the survivor on the changed line

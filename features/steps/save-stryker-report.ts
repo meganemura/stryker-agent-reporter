@@ -20,7 +20,10 @@ export default defineStep({
     changedLine: z.number(),
     unchangedLine: z.number(),
   }),
-  returns: z.object({ report: z.string().describe("the report's path, relative to root") }),
+  returns: z.object({
+    report: z.string().describe("the report's path, relative to root"),
+    survivorLines: z.array(z.number()).describe("the start line of each surviving mutant the report holds, ascending"),
+  }),
   from: {
     root: [createChangedRepository, "root"],
     file: [createChangedRepository, "file"],
@@ -63,6 +66,6 @@ export default defineStep({
     };
     mkdirSync(join(root, "reports/mutation"), { recursive: true });
     writeFileSync(join(root, REPORT), JSON.stringify(report, null, 2));
-    return { report: REPORT };
+    return { report: REPORT, survivorLines: [changedLine, unchangedLine].sort((a, b) => a - b) };
   },
 });

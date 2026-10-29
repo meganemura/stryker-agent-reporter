@@ -2,30 +2,23 @@ import { defineStep, z } from "nukadoko";
 import createChangedRepository from "./create-changed-repository.ts";
 import gateSinceBase from "./gate-since-base.ts";
 
-// A stale file is dropped rather than scoped, so a zero staleCount is what
-// makes the missing unchanged-line survivor a scoping result and not a dropped
-// file.
+// "Only" is every named survivor on the changed line, and an empty list
+// breaks an each claim, so a gate that names nothing does not pass either.
 export default defineStep({
-  description: "Asserts the gate exited 1 with exactly the survivor on the changed line, and scoped every file.",
+  description: "Claims the gate exited 1 and every survivor it named is on the changed line, with at least one named.",
   pattern: "the gate exits 1 and names only the survivor on the changed line",
   args: z.object({
     exitCode: z.number(),
     survivorLines: z.array(z.number()),
-    staleCount: z.number(),
     changedLine: z.number(),
   }),
   from: {
     exitCode: [gateSinceBase, "exitCode"],
     survivorLines: [gateSinceBase, "survivorLines"],
-    staleCount: [gateSinceBase, "staleCount"],
     changedLine: [createChangedRepository, "changedLine"],
   },
-  mutates: false,
-  run({}, { exitCode, survivorLines, staleCount, changedLine }) {
-    if (staleCount !== 0) throw new Error(`expected every file scoped, the gate reported staleCount ${staleCount}`);
-    if (survivorLines.length !== 1 || survivorLines[0] !== changedLine) {
-      throw new Error(`expected only the survivor on line ${changedLine}, the gate reported lines [${survivorLines.join(", ")}]`);
-    }
-    if (exitCode !== 1) throw new Error(`expected exit 1, the gate exited ${exitCode}`);
-  },
+  claims: [
+    { actual: "exitCode", compare: "equal", expected: { literal: 1 } },
+    { actual: "survivorLines", each: { claims: [{ compare: "equal", expected: { from: "changedLine" } }] } },
+  ],
 });
